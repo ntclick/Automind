@@ -91,3 +91,9 @@ Once the repository is cloned:
 ## 📄 License
 
 Distributed under the MIT License. See [LICENSE.md](LICENSE.md) for more information.
+
+---
+
+**Made with ❤️ for Arc users**
+
+**Author**: [@trungkts29](https://x.com/trungkts29)
