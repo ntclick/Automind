@@ -1,0 +1,261 @@
+/* ✅ ADD THESE STYLES TO YOUR EXISTING styles.css */
+
+/* Enhanced AI Floating Button */
+.ai-floating-button {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 25px;
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
+    transition: all 0.3s ease;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 140px;
+    font-family: Arial, Helvetica, sans-serif;
+}
+
+.ai-floating-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+    background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+}
+
+.ai-floating-button:active {
+    transform: translateY(0);
+}
+
+/* Enhanced Animations */
+@keyframes sparkle {
+    0%, 100% { 
+        transform: scale(1) rotate(0deg); 
+        opacity: 1; 
+    }
+    50% { 
+        transform: scale(1.1) rotate(5deg); 
+        opacity: 0.8; 
+    }
+}
+
+@keyframes slideInRight {
+    from { 
+        transform: translateX(100%); 
+        opacity: 0; 
+    }
+    to { 
+        transform: translateX(0); 
+        opacity: 1; 
+    }
+}
+
+@keyframes slideOutRight {
+    from { 
+        transform: translateX(0); 
+        opacity: 1; 
+    }
+    to { 
+        transform: translateX(100%); 
+        opacity: 0; 
+    }
+}
+
+@keyframes slideInDown {
+    from { 
+        transform: translateX(-50%) translateY(-20px); 
+        opacity: 0; 
+    }
+    to { 
+        transform: translateX(-50%) translateY(0); 
+        opacity: 1; 
+    }
+}
+
+@keyframes slideOutUp {
+    from { 
+        transform: translateX(-50%) translateY(0); 
+        opacity: 1; 
+    }
+    to { 
+        transform: translateX(-50%) translateY(-20px); 
+        opacity: 0; 
+    }
+}
+
+/* Toast Messages */
+.ai-toast {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10001;
+    padding: 12px 20px;
+    border-radius: 25px;
+    font-size: 14px;
+    font-weight: 500;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    animation: slideInDown 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: inherit;
+    max-width: 400px;
+    text-align: center;
+}
+
+.ai-analysis-preview {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 10001;
+    background: #1da1f2;
+    color: white;
+    padding: 15px 20px;
+    border-radius: 12px;
+    max-width: 300px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+    animation: slideInRight 0.3s ease;
+    font-family: inherit;
+}
+
+/* Enhanced Comment Cards */
+.ai-comment-card {
+    margin-bottom: 12px;
+    padding: 16px;
+    border-radius: 12px;
+    transition: all 0.2s ease;
+    cursor: pointer;
+    position: relative;
+    backdrop-filter: blur(10px);
+}
+
+.ai-comment-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* Enhanced Use Button */
+.ai-use-comment-btn {
+    transition: all 0.2s ease;
+}
+
+.ai-use-comment-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+/* Enhanced Rating Buttons */
+.rating-btn {
+    transition: all 0.2s ease !important;
+}
+
+.rating-btn:hover {
+    transform: scale(1.1) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .ai-floating-button {
+        bottom: 15px !important;
+        right: 15px !important;
+        padding: 10px 16px !important;
+        font-size: 13px !important;
+        min-width: 120px !important;
+    }
+    
+    .ai-analysis-preview {
+        right: 10px !important;
+        max-width: 280px !important;
+        padding: 12px 16px !important;
+    }
+    
+    .ai-toast {
+        max-width: 320px !important;
+        font-size: 13px !important;
+        padding: 10px 16px !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .ai-floating-button {
+        bottom: 10px !important;
+        right: 10px !important;
+        padding: 8px 12px !important;
+        font-size: 12px !important;
+        min-width: 100px !important;
+    }
+    
+    .ai-analysis-preview {
+        top: 10px !important;
+        right: 10px !important;
+        max-width: 250px !important;
+    }
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+    .ai-analysis-preview {
+        background: #15202b;
+        border: 1px solid #38444d;
+    }
+    
+    .ai-toast {
+        box-shadow: 0 4px 20px rgba(255,255,255,0.1);
+    }
+}
+
+/* High contrast mode */
+@media (prefers-contrast: high) {
+    .ai-floating-button {
+        border: 2px solid white;
+    }
+    
+    .ai-analysis-preview {
+        border: 2px solid white;
+    }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+    .ai-floating-button,
+    .ai-comment-card,
+    .ai-use-comment-btn,
+    .rating-btn {
+        transition: none !important;
+    }
+    
+    .ai-floating-button:hover,
+    .ai-comment-card:hover,
+    .ai-use-comment-btn:hover,
+    .rating-btn:hover {
+        transform: none !important;
+    }
+    
+    @keyframes sparkle {
+        0%, 100% { transform: none; }
+        50% { transform: none; }
+    }
+    
+    .ai-toast,
+    .ai-analysis-preview {
+        animation: none !important;
+    }
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}

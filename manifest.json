@@ -1,0 +1,114 @@
+{
+  "manifest_version": 3,
+  "name": "AutoMind - AI Reply for X",
+  "version": "2.1.1",
+  "description": "AutoMind: Smart AI replies for X.com posts. Multi-language support with built-in translation. 50 free uses per day.",
+
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabCapture",
+    "scripting",
+    "sidePanel",
+    "offscreen",
+    "tts"
+  ],
+
+  "host_permissions": [
+    "https://twitter.com/*",
+    "https://x.com/*",
+    "https://*.twitter.com/*",
+    "https://*.x.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.moonshot.cn/*",
+    "https://api.moonshot.ai/*",
+    "https://api.deepseek.com/*",
+    "https://integrate.api.nvidia.com/*",
+    "https://automind-proxy.dev102vn.workers.dev/*",
+    "https://translate.googleapis.com/*",
+    "https://api.groq.com/*"
+  ],
+
+  "side_panel": {
+    "default_path": "shared/sidepanel.html"
+  },
+
+  "commands": {
+    "toggle-translation": {
+      "suggested_key": { "default": "Alt+T" },
+      "description": "Toggle Live Translation"
+    },
+    "switch-mode": {
+      "suggested_key": { "default": "Alt+M" },
+      "description": "Switch Translation Mode"
+    }
+  },
+
+  "background": {
+    "service_worker": "shared/background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://twitter.com/*",
+        "https://x.com/*",
+        "https://*.twitter.com/*",
+        "https://*.x.com/*"
+      ],
+      "js": [
+        "shared/language-detector.js",
+        "shared/humanization-advanced.js",
+        "twitter/messenger.js",
+        "twitter/content.js"
+      ],
+      "css": ["shared/styles.css"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+
+  "action": {
+    "default_popup": "shared/popup.html",
+    "default_title": "AutoMind",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+
+  "options_page": "shared/options.html",
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*",
+        "shared/lib/*",
+        "shared/language-detector.js",
+        "shared/humanization-advanced.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.moonshot.cn https://api.moonshot.ai https://api.deepseek.com https://integrate.api.nvidia.com https://automind-proxy.dev102vn.workers.dev https://translate.googleapis.com https://api.groq.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: https:;"
+  },
+
+  "minimum_chrome_version": "88",
+
+  "offline_enabled": false
+}

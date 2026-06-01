@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoMind Settings</title>
+    <style>
+  :root {
+    --bg-0: #0f172a; --bg-1: #1e293b; --bg-2: #334155;
+    /* aliases for component compat */
+    --bg: var(--bg-0); --bg1: var(--bg-1); --bg2: var(--bg-2);
+    --surface: rgba(255,255,255,0.04); --surface-hover: rgba(255,255,255,0.08);
+    --border: rgba(255,255,255,0.08); --border-strong: rgba(255,255,255,0.16);
+    --border-hover: var(--border-strong);
+    --text: #f1f5f9; --text-muted: #94a3b8; --text-dim: #64748b;
+    --primary: #6366f1; --primary-hover: #4f46e5; --primary-soft: rgba(99,102,241,0.15);
+    --success: #10b981; --danger: #ef4444; --warning: #f59e0b;
+    --radius: 10px; --radius-sm: 6px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:linear-gradient(180deg,var(--bg-0) 0%,var(--bg-1) 100%); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; min-height:100vh; line-height:1.5; -webkit-font-smoothing:antialiased; font-size:14px; }
+
+  .page-wrapper { display:flex; min-height:100vh; }
+  .sidebar { width:220px; flex-shrink:0; background:var(--bg-1); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; overflow-y:auto; }
+  .sidebar-brand { display:flex; align-items:center; gap:10px; padding:18px 16px; border-bottom:1px solid var(--border); }
+  .sidebar-logo { width:32px; height:32px; border-radius:8px; background:none; display:grid; place-items:center; flex-shrink:0; overflow:hidden; }
+  .sidebar-logo svg { width:16px; height:16px; }
+  .sidebar-name { font-size:13px; font-weight:600; color:var(--text); }
+  .sidebar-sub { font-size:11px; color:var(--text-dim); }
+  .sidebar-nav { padding:10px 8px; flex:1; }
+  .nav-item { display:flex; align-items:center; gap:9px; padding:9px 10px; border-radius:var(--radius-sm); color:var(--text-muted); font-size:13px; font-weight:500; cursor:pointer; border:none; background:transparent; width:100%; text-align:left; transition:background 0.15s,color 0.15s; margin-bottom:2px; font-family:inherit; }
+  .nav-item:hover { background:var(--surface-hover); color:var(--text); }
+  .nav-item.active { background:var(--primary-soft); color:var(--primary); }
+  .nav-item svg { width:15px; height:15px; flex-shrink:0; }
+
+  .main-area { flex:1; padding:28px 32px; max-width:780px; margin:0 auto; }
+
+  #statusAlert { padding:10px 14px; border-radius:var(--radius-sm); font-size:13px; font-weight:500; margin-bottom:16px; border-left:3px solid; }
+  #statusAlert.success { background:rgba(16,185,129,0.1); color:#34d399; border-color:#10b981; }
+  #statusAlert.error   { background:rgba(239,68,68,0.1);  color:#f87171; border-color:#ef4444; }
+  #statusAlert.warning { background:rgba(245,158,11,0.1); color:#fbbf24; border-color:#f59e0b; }
+
+  .main-tab-content { display:none; animation:fadeIn 0.2s ease; }
+  .main-tab-content.active { display:block; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+
+  .page-heading { margin-bottom:20px; padding-bottom:16px; border-bottom:1px solid var(--border); }
+  .page-heading h2 { font-size:18px; font-weight:600; color:var(--text); margin-bottom:4px; }
+  .page-heading p  { font-size:13px; color:var(--text-muted); }
+
+  .section { background:var(--bg-1); border:1px solid var(--border); border-radius:var(--radius); padding:20px; margin-bottom:16px; }
+  .section h2 { font-size:14px; font-weight:600; color:var(--text); margin-bottom:18px; display:flex; align-items:center; gap:8px; }
+  .section-icon { width:28px; height:28px; background:var(--primary-soft); border-radius:6px; display:grid; place-items:center; color:var(--primary); flex-shrink:0; font-size:13px; font-weight:700; }
+
+  .form-group { margin-bottom:16px; }
+  .form-group:last-child { margin-bottom:0; }
+  .form-group label { display:block; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px; }
+  .form-group input, .form-group select, .form-group textarea { width:100%; padding:9px 12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text); font-size:13px; font-family:inherit; transition:border-color 0.15s,background 0.15s; appearance:none; -webkit-appearance:none; }
+  .form-group select { background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 10px center; padding-right:32px; }
+  .form-group input:focus, .form-group select:focus, .form-group textarea:focus { outline:none; border-color:var(--primary); background:var(--primary-soft); }
+  .form-group input::placeholder, .form-group textarea::placeholder { color:var(--text-dim); }
+  .form-group small { display:block; margin-top:5px; font-size:11px; color:var(--text-dim); }
+  .form-group input[type=range] { padding:0; border:none; background:transparent; accent-color:var(--primary); height:20px; }
+  input[type=password] { font-family:monospace; letter-spacing:2px; }
+  select option { background:var(--bg-1); color:var(--text); }
+
+  .button-group { display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; }
+  .btn { display:inline-flex; align-items:center; gap:6px; padding:9px 16px; border-radius:var(--radius-sm); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer; border:none; transition:background 0.15s,opacity 0.15s,transform 0.1s; white-space:nowrap; background:var(--primary); color:#fff; }
+  .btn:hover { opacity:0.85; }
+  .btn:active { transform:scale(0.98); }
+  .btn-secondary { background:var(--surface); color:var(--text-muted); border:1px solid var(--border); }
+  .btn-secondary:hover { background:var(--surface-hover); color:var(--text); border-color:var(--border-hover); }
+
+  .tone-selection { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; }
+  .tone-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; cursor:pointer; transition:all 0.15s; position:relative; }
+  .tone-card:hover { border-color:var(--border-hover); background:var(--surface-hover); }
+  .tone-card.selected { border-color:var(--primary); background:var(--primary-soft); }
+  .tone-checkbox { position:absolute; top:10px; right:10px; }
+  .tone-checkbox input[type=checkbox] { accent-color:var(--primary); width:15px; height:15px; }
+  .tone-checkbox label { display:none; }
+  .tone-card h3 { font-size:13px; font-weight:600; color:var(--text); margin-bottom:4px; display:flex; align-items:center; gap:6px; }
+  .tone-icon { width:22px; height:22px; background:var(--primary-soft); border-radius:5px; display:grid; place-items:center; color:var(--primary); font-size:11px; font-weight:700; flex-shrink:0; }
+  .tone-description { font-size:11px; color:var(--text-dim); line-height:1.4; }
+
+  .tab-navigation { display:flex; gap:4px; margin-bottom:16px; background:var(--bg-0); border-radius:var(--radius-sm); padding:4px; }
+  .tab-btn { flex:1; display:flex; align-items:center; justify-content:center; gap:6px; padding:7px 10px; border:none; background:transparent; border-radius:4px; color:var(--text-muted); font-size:12px; font-weight:500; cursor:pointer; transition:all 0.15s; font-family:inherit; }
+  .tab-btn:hover { color:var(--text); background:var(--surface); }
+  .tab-btn.active { background:var(--bg-1); color:var(--text); box-shadow:0 1px 4px rgba(0,0,0,0.2); }
+  .tab-icon { font-size:14px; }
+  .tab-content { display:none; }
+  .tab-content.active { display:block; }
+
+  .interest-selection { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; margin-bottom:8px; }
+  .interest-item { display:flex; align-items:center; gap:8px; padding:8px 10px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; transition:all 0.15s; }
+  .interest-item:hover { border-color:var(--border-hover); }
+  .interest-item input[type=checkbox] { accent-color:var(--primary); flex-shrink:0; }
+  .interest-item label { font-size:12px; color:var(--text-muted); cursor:pointer; }
+
+  .info-box { display:none; }
+
+  /* Onboarding modal — shown only on first install */
+  .ob-overlay {
+    position:fixed; inset:0; z-index:9999;
+    background:rgba(0,0,0,0.6); backdrop-filter:blur(6px);
+    display:flex; align-items:center; justify-content:center;
+    padding:20px; animation:fadeIn 0.2s ease;
+  }
+  .ob-overlay.hidden { display:none; }
+  .ob-modal {
+    background:var(--bg-1); border:1px solid var(--border);
+    border-radius:16px; padding:32px 28px;
+    max-width:460px; width:100%;
+    box-shadow:0 24px 60px rgba(0,0,0,0.5);
+    animation:slideUp 0.3s cubic-bezier(0.16,1,0.3,1);
+  }
+  @keyframes slideUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:none; } }
+  .ob-modal-header { text-align:center; margin-bottom:24px; }
+  .ob-icon-lg {
+    margin:0 auto 14px;
+    width:48px; height:48px;
+    display:grid; place-items:center;
+  }
+  .ob-modal-title { font-size:20px; font-weight:600; color:var(--text); margin-bottom:6px; }
+  .ob-modal-sub { font-size:13px; color:var(--text-muted); }
+
+  .ob-choices { display:flex; flex-direction:column; gap:10px; margin-bottom:14px; }
+  .ob-choice {
+    position:relative;
+    text-align:left;
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:14px 16px;
+    cursor:pointer;
+    transition:all 0.15s;
+    color:var(--text);
+    font-family:inherit;
+  }
+  .ob-choice:hover { background:var(--primary-soft); border-color:var(--primary); transform:translateY(-1px); }
+  .ob-choice-free { border-color:rgba(99,102,241,0.4); background:rgba(99,102,241,0.06); }
+  .ob-choice-free:hover { background:rgba(99,102,241,0.12); }
+  .ob-choice-badge {
+    position:absolute; top:10px; right:12px;
+    font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.4px;
+    color:var(--primary);
+    background:rgba(99,102,241,0.15);
+    padding:2px 8px; border-radius:999px;
+  }
+  .ob-choice-title {
+    display:flex; align-items:center; gap:8px;
+    font-size:14px; font-weight:600; color:var(--text);
+    margin-bottom:4px;
+  }
+  .ob-choice-title svg { width:16px; height:16px; color:var(--primary); }
+  .ob-choice-desc { font-size:12px; color:var(--text-muted); line-height:1.5; }
+  .ob-choice-desc strong { color:var(--text); }
+
+  .ob-skip {
+    display:block; margin:0 auto;
+    background:transparent; border:none;
+    color:var(--text-dim); font-size:12px; cursor:pointer;
+    padding:8px; font-family:inherit;
+  }
+  .ob-skip:hover { color:var(--text-muted); text-decoration:underline; }
+
+  /* Tone count badge */
+  .tone-count-badge {
+    display:inline-flex; align-items:center;
+    padding:3px 10px;
+    background:var(--primary-soft);
+    color:var(--primary);
+    border-radius:999px;
+    font-size:11px;
+    font-weight:600;
+    margin-left:auto;
+  }
+  .tone-count-badge.full {
+    background:rgba(245,158,11,0.15);
+    color:var(--warning);
+  }
+
+  /* Disabled tone card when at limit */
+  .tone-card.disabled { opacity:0.4; cursor:not-allowed; pointer-events:none; }
+  .tone-card.disabled:hover { background:var(--surface); border-color:var(--border); }
+
+  /* AI Mode picker — radio cards */
+  .ai-mode-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  @media (max-width:600px) { .ai-mode-grid { grid-template-columns:1fr; } }
+  .ai-mode-card {
+    position:relative;
+    display:block;
+    padding:16px;
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    cursor:pointer;
+    transition:all 0.15s;
+  }
+  .ai-mode-card:hover { background:var(--surface-hover); border-color:var(--border-hover); }
+  .ai-mode-card input[type=radio] { position:absolute; top:14px; right:14px; accent-color:var(--primary); }
+  .ai-mode-card:has(input:checked) {
+    border-color:var(--primary);
+    background:rgba(99,102,241,0.08);
+  }
+  .ai-mode-card-body { padding-right:24px; }
+  .ai-mode-title { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:600; color:var(--text); margin-bottom:6px; }
+  .ai-mode-title svg { width:16px; height:16px; color:var(--primary); }
+  .ai-mode-desc { font-size:12px; color:var(--text-muted); line-height:1.5; }
+  .ai-mode-desc strong { color:var(--text); }
+
+  .global-actions { margin-top:20px; padding-top:16px; border-top:1px solid var(--border); display:flex; gap:8px; }
+  #temperatureValue { font-size:12px; color:var(--primary); font-weight:600; margin-left:8px; }
+  ::-webkit-scrollbar { width:6px; } ::-webkit-scrollbar-thumb { background:var(--border-hover); border-radius:3px; }
+
+  /* main-tab compat aliases */
+  .main-tab-navigation { display:none; }
+  .container { display:none; } /* replaced by .page-wrapper */
+</style>
+</head>
+<body>
+<!-- Hidden debug buttons kept for JS compatibility -->
+<div style="display:none">
+  <button id="testAlertBtn"></button><button id="testAllSavesBtn"></button>
+  <button id="testAllSaveButtonsBtn"></button><button id="testAllFunctionsBtn"></button>
+  <button id="resetDailyQuotaBtn"></button><button id="testSettingsSyncBtn"></button>
+  <button id="testQuotaBtn"></button><button id="testAPIConnectionBtn"></button>
+  <button id="testAIGenerationBtn"></button><button id="testPingBtn"></button>
+</div>
+
+<div class="page-wrapper">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-brand">
+      <div class="sidebar-logo">
+        <img src="../icons/icon-32.png" width="32" height="32" style="border-radius:8px;display:block;">
+      </div>
+      <div>
+        <div class="sidebar-name">AutoMind</div>
+        <div class="sidebar-sub">Smart Replies, Better Connections</div>
+      </div>
+    </div>
+    <div class="sidebar-nav">
+      <button class="nav-item active" data-main-tab="user">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span class="nav-label">User Settings</span>
+      </button>
+      <button class="nav-item" data-main-tab="ai">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span class="nav-label">AI & API Keys</span>
+      </button>
+      <button class="nav-item" data-main-tab="system">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span class="nav-label">System</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Main content -->
+  <div class="main-area">
+    <div id="statusAlert" style="display:none;"></div>
+
+    <!-- Onboarding modal (first-install) -->
+    <div id="onboardingOverlay" class="ob-overlay hidden">
+      <div class="ob-modal">
+        <div class="ob-modal-header">
+          <div class="ob-icon-lg">
+            <img src="../icons/icon-128.png" width="48" height="48" style="border-radius:12px;display:block;">
+          </div>
+          <h2 class="ob-modal-title">Welcome to AutoMind</h2>
+          <p class="ob-modal-sub">Choose how you'd like to use AI</p>
+        </div>
+
+        <div class="ob-choices">
+          <button class="ob-choice ob-choice-free" id="chooseFree">
+            <div class="ob-choice-badge">Recommended</div>
+            <div class="ob-choice-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              Use for free
+            </div>
+            <div class="ob-choice-desc">
+              <strong>50 uses per day</strong>, resets at 0h UTC. No signup, no API key required.
+            </div>
+          </button>
+
+          <button class="ob-choice ob-choice-own" id="chooseOwnKey">
+            <div class="ob-choice-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+              Bring your own API key
+            </div>
+            <div class="ob-choice-desc">
+              <strong>Unlimited</strong>. Use your own OpenAI / Claude / Gemini / Kimi key.
+            </div>
+          </button>
+        </div>
+
+        <button class="ob-skip" id="skipOnboarding">Skip</button>
+      </div>
+    </div>
+
+    <!-- User Settings Tab -->
+    <div class="main-tab-content active" id="user-tab">
+            <!-- Info Box -->
+            <div class="info-box">
+                    <h3>ℹ️ User Preferences</h3>
+                    <p>Configure your tone preferences and language settings for AI-generated replies.</p>
+            </div>
+
+            <!-- Tone Selection Section -->
+            <div class="section">
+                <h2>
+                    <div class="section-icon">T</div>
+                    Tone Selection
+                    <span class="tone-count-badge" id="toneCountBadge" title="Maximum 8 tones">3/8</span>
+                </h2>
+                <p style="font-size:12px;color:var(--text-muted);margin:-10px 0 14px 0;">Pick up to 8 tones. Each tone generates a reply with its own voice.</p>
+
+                <!-- Hidden defaultTone kept for JS compat — value sync'd to first selected tone -->
+                <select id="defaultTone" style="display:none;">
+                    <option value="professional">Professional</option>
+                </select>
+
+                <div class="tone-selection">
+                    <div class="tone-card" data-tone="professional">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-professional" value="professional">
+                                <label for="tone-professional"></label>
+                            </div>
+                        <h3>
+                            <div class="tone-icon">P</div>
+                            Professional
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Authority Builder:</strong> Professional responses in 1-2 lines. Use for: business posts, serious topics, credibility.
+                        </div>
+                    </div>
+                    
+                    <div class="tone-card" data-tone="casual">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-casual" value="casual">
+                                <label for="tone-casual"></label>
+                            </div>
+                        <h3>
+                            <div class="tone-icon">C</div>
+                            Casual
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Community Builder:</strong> Casual responses in 1-2 lines. Use for: lifestyle posts, memes, building friendships.
+                        </div>
+                    </div>
+                    
+                    <div class="tone-card" data-tone="sarcastic">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-sarcastic" value="sarcastic">
+                                <label for="tone-sarcastic"></label>
+                            </div>
+                        <h3>
+                            <div class="tone-icon">S</div>
+                            Sarcastic
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Reality Checker:</strong> Sarcastic responses in 1-2 lines. Use for: debunking misinformation, responding to lies.
+                        </div>
+                    </div>
+                    
+                    <div class="tone-card" data-tone="witty">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-witty" value="witty">
+                                <label for="tone-witty"></label>
+                            </div>
+                        <h3>
+                            <div class="tone-icon">W</div>
+                            Witty
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Entertainment Creator:</strong> Witty responses in 1-2 lines. Use for: viral posts, funny content, standing out.
+                        </div>
+                    </div>
+                    
+                    <div class="tone-card" data-tone="concise">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-concise" value="concise">
+                                <label for="tone-concise"></label>
+                            </div>
+                        <h3>
+                            <div class="tone-icon">C</div>
+                            Concise
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Truth Validator:</strong> Concise responses in 1-2 lines. Use for: agreeing with solid arguments, supporting good ideas.
+                        </div>
+                    </div>
+
+                        <div class="tone-card" data-tone="analytical">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-analytical" value="analytical">
+                                <label for="tone-analytical"></label>
+                            </div>
+                            <h3>
+                                <div class="tone-icon">A</div>
+                                Analytical
+                            </h3>
+                            <div class="tone-description">
+                                <strong>Logic Processor:</strong> Analytical responses in 1-2 lines. Use for: research posts, explaining trends, data analysis.
+                            </div>
+                        </div>
+
+                        <div class="tone-card" data-tone="empathetic">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-empathetic" value="empathetic">
+                                <label for="tone-empathetic"></label>
+                            </div>
+                            <h3>
+                                <div class="tone-icon">E</div>
+                                Empathetic
+                            </h3>
+                            <div class="tone-description">
+                                <strong>Support Provider:</strong> Empathetic responses in 1-2 lines. Use for: mental health posts, personal struggles, showing compassion.
+                            </div>
+                        </div>
+
+                        <div class="tone-card" data-tone="humorous">
+                            <div class="tone-checkbox">
+                                <input type="checkbox" id="tone-humorous" value="humorous">
+                                <label for="tone-humorous"></label>
+                            </div>
+                            <h3>
+                                <div class="tone-icon">H</div>
+                                Humorous
+                            </h3>
+                            <div class="tone-description">
+                                <strong>Mood Lifter:</strong> Humorous responses in 1-2 lines. Use for: stressful topics, cheering people up, adding positivity.
+                        </div>
+                    </div>
+
+                    <!-- Additional Concise Tones -->
+                    <div class="tone-card" data-tone="brief">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-brief" value="brief">
+                            <label for="tone-brief"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">B</div>
+                            Brief
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Efficiency Expert:</strong> Quick responses in 1-2 lines. Adapts to any language. Use for: busy timeline, quick acknowledgments.
+                        </div>
+                    </div>
+
+                    <div class="tone-card" data-tone="direct">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-direct" value="direct">
+                            <label for="tone-direct"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">D</div>
+                            Direct
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Truth Enforcer:</strong> Clear corrections in 1-2 lines. Adapts to any language. Use for: obvious lies, fake news, corrections.
+                        </div>
+                    </div>
+
+                    <div class="tone-card" data-tone="punchy">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-punchy" value="punchy">
+                            <label for="tone-punchy"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">!</div>
+                            Punchy
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Hype Generator:</strong> Energetic celebrations in 1-2 lines. Adapts to any language. Use for: celebrating wins, hyping achievements.
+                        </div>
+                    </div>
+
+                    <div class="tone-card" data-tone="snappy">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-snappy" value="snappy">
+                            <label for="tone-snappy"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">~</div>
+                            Snappy
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Attitude Adjuster:</strong> Confident dismissals in 1-2 lines. Adapts to any language. Use for: dealing with drama, dismissing haters.
+                        </div>
+                    </div>
+
+                    <div class="tone-card" data-tone="crisp">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-crisp" value="crisp">
+                            <label for="tone-crisp"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">*</div>
+                            Crisp
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Class Elevator:</strong> Sophisticated responses in 1-2 lines. Adapts to any language. Use for: intellectual topics, formal events.
+                        </div>
+                    </div>
+
+                    <div class="tone-card" data-tone="sharp">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-sharp" value="sharp">
+                            <label for="tone-sharp"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">#</div>
+                            Sharp
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Logic Warrior:</strong> Precise corrections in 1-2 lines. Adapts to any language. Use for: debates, academic discussions.
+                        </div>
+                    </div>
+
+                    <div class="tone-card" data-tone="contrarian">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-contrarian" value="contrarian">
+                            <label for="tone-contrarian"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">⚔️</div>
+                            Contrarian
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Devil's Advocate:</strong> Challenges popular opinions with alternative perspectives. Adapts to any language. Use for: controversial topics, critical thinking.
+                        </div>
+                    </div>
+
+                    <div class="tone-card" data-tone="thao_mai">
+                        <div class="tone-checkbox">
+                            <input type="checkbox" id="tone-thao_mai" value="thao_mai">
+                            <label for="tone-thao_mai"></label>
+                        </div>
+                        <h3>
+                            <div class="tone-icon">?</div>
+                            Sweet & Sour
+                        </h3>
+                        <div class="tone-description">
+                            <strong>Sweet & Sour Style:</strong> Polite but subtly sarcastic in 1-2 lines. Adapts to any language. Use for: passive-aggressive responses, backhanded compliments.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                        <button class="btn">Save Tone Settings</button>
+                        <button class="btn btn-secondary">Reset to Defaults</button>
+                </div>
+            </div>
+
+            <!-- Language Preference Section -->
+            <div class="section">
+                <h2>
+                    <div class="section-icon">L</div>
+                    Language Preference
+                </h2>
+                <div class="form-group">
+                    <label for="preferredLanguage">Preferred Language</label>
+                    <select id="preferredLanguage">
+                        <option value="auto">Auto-detect (Recommended)</option>
+                        <option value="english">English</option>
+                        <option value="vietnamese">Vietnamese</option>
+                        <option value="chinese">Chinese</option>
+                        <option value="japanese">Japanese</option>
+                        <option value="korean">Korean</option>
+                    </select>
+                </div>
+                <div class="button-group">
+                        <button class="btn">Save Language Settings</button>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- AI Configuration Tab -->
+            <div class="main-tab-content" id="ai-tab">
+                <!-- Info Box -->
+                <!-- AI Mode Selection — System default vs Bring-your-own-key -->
+                <div class="section">
+                    <h2>
+                        <div class="section-icon">M</div>
+                        AI Mode
+                    </h2>
+                    <div class="ai-mode-grid">
+                        <label class="ai-mode-card" data-mode="system">
+                            <input type="radio" name="aiMode" value="system" id="aiModeSystem" checked>
+                            <div class="ai-mode-card-body">
+                                <div class="ai-mode-title">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                                    System default
+                                </div>
+                                <div class="ai-mode-desc">
+                                    <strong>50 free uses per day.</strong> Powered by AutoMind cloud — no API key required, no setup.
+                                </div>
+                            </div>
+                        </label>
+                        <label class="ai-mode-card" data-mode="custom">
+                            <input type="radio" name="aiMode" value="custom" id="aiModeCustom">
+                            <div class="ai-mode-card-body">
+                                <div class="ai-mode-title">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                                    My own AI key
+                                </div>
+                                <div class="ai-mode-desc">
+                                    <strong>Unlimited.</strong> Pick one provider and paste your own API key. Stored locally only.
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Custom AI config — only visible when "My own AI key" selected -->
+                <div class="section" id="customAiSection" style="display:none;">
+                    <h2>
+                        <div class="section-icon">K</div>
+                        Provider &amp; API Key
+                    </h2>
+                    <div class="form-group">
+                        <label for="apiProvider">Choose ONE provider</label>
+                        <select id="apiProvider">
+                            <option value="openai">OpenAI (GPT)</option>
+                            <option value="claude">Claude (Anthropic)</option>
+                            <option value="gemini">Gemini (Google)</option>
+                            <option value="kimi">Kimi (Moonshot AI)</option>
+                            <option value="deepseek">DeepSeek</option>
+                            <option value="nvidia">NVIDIA</option>
+                            <option value="local">Local AI / Custom endpoint</option>
+                        </select>
+                        <small>Only one active provider at a time when in custom mode.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="selectedModel">Model</label>
+                        <select id="selectedModel">
+                            <option value="gpt-4o-mini" selected>GPT-4o Mini</option>
+                        </select>
+                        <small>Populated automatically when you switch provider above.</small>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn">Save Model Settings</button>
+                        <button class="btn btn-secondary">Test Connection</button>
+                    </div>
+                </div>
+
+                <!-- API Keys Configuration Section -->
+                <div class="section" id="apiKeysSection" style="display:none;">
+                    <h2>
+                        <div class="section-icon">K</div>
+                        API Keys (stored locally only)
+                    </h2>
+
+                    <!-- Provider Tab Navigation -->
+                    <div class="tab-navigation">
+                        <button class="tab-btn active" data-tab="openai">
+                            <div class="tab-icon">🤖</div>
+                            OpenAI
+                        </button>
+                        <button class="tab-btn" data-tab="claude">
+                            <div class="tab-icon">🧠</div>
+                            Claude
+                        </button>
+                        <button class="tab-btn" data-tab="gemini">
+                            <div class="tab-icon">💎</div>
+                            Gemini
+                        </button>
+                        <button class="tab-btn" data-tab="kimi">
+                            <div class="tab-icon">🌙</div>
+                            Kimi
+                        </button>
+                        <button class="tab-btn" data-tab="deepseek">
+                            <div class="tab-icon">🐳</div>
+                            DeepSeek
+                        </button>
+                        <button class="tab-btn" data-tab="nvidia">
+                            <div class="tab-icon">🟢</div>
+                            NVIDIA
+                        </button>
+                        <button class="tab-btn" data-tab="groq">
+                            <div class="tab-icon">⚡</div>
+                            Groq
+                        </button>
+                        <button class="tab-btn" data-tab="local">
+                            <div class="tab-icon">🏠</div>
+                            Local
+                        </button>
+                    </div>
+
+                    <!-- OpenAI Tab -->
+                    <div class="tab-content active" id="openai-tab">
+                        <div class="form-group">
+                            <label for="openaiApiKey">OpenAI API Key</label>
+                            <input type="password" id="openaiApiKey" placeholder="sk-...">
+                            <small>Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI Platform</a></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="openaiModel">Selected Model</label>
+                            <select id="openaiModel">
+                                <option value="gpt-4o-mini" selected>GPT-4o Mini (cheapest, recommended)</option>
+                                <option value="gpt-4o">GPT-4o</option>
+                                <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+                                <option value="gpt-4.1">GPT-4.1</option>
+                                <option value="gpt-5.4-mini">GPT-5.4 Mini (newer, 5x pricier)</option>
+                                <option value="gpt-5.4-nano">GPT-5.4 Nano</option>
+                                <option value="gpt-5.4">GPT-5.4</option>
+                                <option value="gpt-5.5">GPT-5.5 (flagship)</option>
+                                <option value="gpt-5">GPT-5</option>
+                                <option value="gpt-5-mini">GPT-5 Mini</option>
+                                <option value="gpt-5-nano">GPT-5 Nano</option>
+                                <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                            </select>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn">Save OpenAI Settings</button>
+                            <button class="btn btn-secondary">Test OpenAI</button>
+                        </div>
+                    </div>
+
+                    <!-- Claude Tab -->
+                    <div class="tab-content" id="claude-tab">
+                        <div class="form-group">
+                            <label for="claudeApiKey">Claude API Key</label>
+                            <input type="password" id="claudeApiKey" placeholder="sk-ant-...">
+                            <small>Get your API key from <a href="https://console.anthropic.com/" target="_blank">Anthropic Console</a></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="claudeModel">Selected Model</label>
+                            <select id="claudeModel">
+                                <option value="claude-haiku-4-5-20251001" selected>Claude Haiku 4.5 (recommended)</option>
+                                <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (balanced)</option>
+                                <option value="claude-opus-4-7">Claude Opus 4.7 (top reasoning)</option>
+                                <option value="claude-opus-4-6">Claude Opus 4.6</option>
+                                <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5</option>
+                                <option value="claude-4-sonnet-20250522">Claude 4 Sonnet (legacy)</option>
+                                <option value="claude-4-haiku">Claude 4 Haiku (legacy)</option>
+                                <option value="claude-3.5-sonnet">Claude 3.5 Sonnet (legacy)</option>
+                            </select>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn">Save Claude Settings</button>
+                            <button class="btn btn-secondary">Test Claude</button>
+                        </div>
+                    </div>
+
+                    <!-- Gemini Tab -->
+                    <div class="tab-content" id="gemini-tab">
+                        <div class="form-group">
+                            <label for="geminiApiKey">Gemini API Key</label>
+                            <input type="password" id="geminiApiKey" placeholder="AIza...">
+                            <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></small>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn">Save Gemini Settings</button>
+                            <button class="btn btn-secondary">Test Gemini</button>
+                        </div>
+                    </div>
+
+                    <!-- Kimi Tab -->
+                    <div class="tab-content" id="kimi-tab">
+                        <div class="form-group">
+                            <label for="kimiApiKey">Kimi API Key</label>
+                            <input type="password" id="kimiApiKey" placeholder="sk-...">
+                            <small>Get your API key from <a href="https://platform.moonshot.cn/console/api-keys" target="_blank">Moonshot AI Platform</a></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="kimiModel">Selected Model</label>
+                            <select id="kimiModel">
+                                <option value="kimi-k2.6">Kimi K2.6 (latest)</option>
+                                <option value="kimi-k2.5">Kimi K2.5 (vision)</option>
+                                <option value="kimi-k2-thinking">Kimi K2 Thinking</option>
+                                <option value="moonshot-v1-32k" selected>Moonshot v1 32K (recommended)</option>
+                                <option value="moonshot-v1-128k">Moonshot v1 128K</option>
+                                <option value="moonshot-v1-8k">Moonshot v1 8K (cheapest)</option>
+                            </select>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn">Save Kimi Settings</button>
+                            <button class="btn btn-secondary">Test Kimi</button>
+                        </div>
+                    </div>
+
+                    <!-- DeepSeek Tab -->
+                    <div class="tab-content" id="deepseek-tab">
+                        <div class="form-group">
+                            <label for="deepseekApiKey">DeepSeek API Key</label>
+                            <input type="password" id="deepseekApiKey" placeholder="sk-...">
+                            <small>Get your API key from <a href="https://platform.deepseek.com/api_keys" target="_blank">DeepSeek Platform</a></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="deepseekModel">Selected Model</label>
+                            <select id="deepseekModel">
+                                <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (cheap, recommended)</option>
+                                <option value="deepseek-v4-pro">DeepSeek V4 Pro (flagship)</option>
+                                <option value="deepseek-chat">deepseek-chat (legacy alias)</option>
+                                <option value="deepseek-reasoner">deepseek-reasoner (legacy alias)</option>
+                            </select>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn">Save DeepSeek Settings</button>
+                            <button class="btn btn-secondary">Test DeepSeek</button>
+                        </div>
+                    </div>
+
+                    <!-- NVIDIA Tab -->
+                    <div class="tab-content" id="nvidia-tab">
+                        <div class="form-group">
+                            <label for="nvidiaApiKey">NVIDIA API Key</label>
+                            <input type="password" id="nvidiaApiKey" placeholder="nvapi-...">
+                            <small>Get your API key from <a href="https://build.nvidia.com/" target="_blank">NVIDIA NIM</a></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="nvidiaModel">Selected Model</label>
+                            <select id="nvidiaModel">
+                                <option value="minimaxai/minimax-m2.7" selected>MiniMax M2.7 (Reasoning)</option>
+                                <option value="meta/llama-4-maverick-17b-128e-instruct">Llama 4 Maverick 17B</option>
+                                <option value="step-3.5-flash">Step 3.5 Flash</option>
+                                <option value="mistralai/mistral-large-3-675b-instruct-2512">Mistral Large 3 (675B)</option>
+                                <option value="mistralai/mistral-nemotron">Mistral Nemotron</option>
+                                <option value="qwen/qwen3-coder-480b-a35b-instruct">Qwen 3 Coder 480B</option>
+                                <option value="google/gemma-3-27b-it">Gemma 3 27B IT</option>
+                                <option value="moonshotai/kimi-k2-instruct">Kimi K2 Instruct</option>
+                                <option value="moonshotai/kimi-k2-thinking">Kimi K2 Thinking</option>
+                                <option value="z.ai/glm-4.7">GLM 4.7</option>
+                            </select>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn">Save NVIDIA Settings</button>
+                            <button class="btn btn-secondary">Test NVIDIA</button>
+                        </div>
+                    </div>
+
+                    <!-- Groq Tab -->
+                    <div class="tab-content" id="groq-tab">
+                        <div class="form-group">
+                            <label for="groqApiKey">Groq API Key</label>
+                            <input type="password" id="groqApiKey" placeholder="gsk_...">
+                            <small>Get your API key from <a href="https://console.groq.com/keys" target="_blank">Groq Console</a></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="groqModel">Selected Model</label>
+                            <select id="groqModel">
+                                <option value="whisper-large-v3" selected>whisper-large-v3 (highly accurate, recommended)</option>
+                                <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (faster, lower cost)</option>
+                            </select>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn" id="saveGroqSettingsBtn">Save Groq Settings</button>
+                            <button class="btn btn-secondary" id="testGroqBtn">Test Groq</button>
+                        </div>
+                    </div>
+
+                    <!-- Local AI Tab -->
+                    <div class="tab-content" id="local-tab">
+                        <div class="form-group">
+                            <label for="customEndpoint">Custom Endpoint</label>
+                            <input type="text" id="customEndpoint" placeholder="http://localhost:11434/v1">
+                            <small>For Ollama, LM Studio, or other local AI servers</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="localModel">Selected Model</label>
+                            <select id="localModel">
+                                <option value="auto">Auto-detect</option>
+                                <option value="llama-3.1">Llama 3.1</option>
+                                <option value="mistral-7b">Mistral 7B</option>
+                                <option value="codellama">Code Llama</option>
+                            </select>
+                        </div>
+                        <div class="button-group">
+                            <button class="btn">Save Local Settings</button>
+                            <button class="btn btn-secondary">Test Local AI</button>
+                </div>
+            </div>
+
+                    <!-- Global Actions -->
+                    <div class="global-actions">
+                        <button class="btn btn-primary">Save All Settings</button>
+                        <button class="btn btn-secondary">Test All Connections</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Settings Tab -->
+            <div class="main-tab-content" id="system-tab">
+                <!-- Info Box -->
+                <div class="info-box">
+                    <h3>ℹ️ System Configuration</h3>
+                    <p>Configure system-wide settings for usage limits and AI behavior.</p>
+                </div>
+
+                <!-- System Settings Section -->
+                <div class="section">
+                    <h2>
+                        <div class="section-icon">S</div>
+                        System Settings
+                    </h2>
+                    <div class="form-group">
+                        <label for="dailyQuota">Daily Usage Limit</label>
+                        <input type="number" id="dailyQuota" value="50" min="0" max="1000">
+                        <small>Maximum number of AI replies per day</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="maxTokens">Max Tokens per Reply</label>
+                        <input type="number" id="maxTokens" value="150" min="50" max="500">
+                        <small>Maximum length of generated replies</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="temperature">AI Creativity (Temperature)</label>
+                        <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7">
+                        <span id="temperatureValue">0.7</span>
+                        <small>Lower = more focused, Higher = more creative</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="promptType">Prompt Type</label>
+                        <select id="promptType">
+                            <option value="default">Default</option>
+                            <option value="creative">Creative</option>
+                            <option value="concise">Concise</option>
+                            <option value="detailed">Detailed</option>
+                            <option value="humorous">Humorous</option>
+                        </select>
+                        <small>How detailed and structured the AI prompt should be</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="commentLength">Comment Length</label>
+                        <select id="commentLength">
+                            <option value="short">Short (1-2 lines)</option>
+                            <option value="medium">Medium (3-5 lines)</option>
+                            <option value="long">Long (6-10 lines)</option>
+                        </select>
+                        <small>Preferred length of generated comments</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="replyLanguage">Reply Language</label>
+                        <select id="replyLanguage">
+                            <option value="auto">Auto-detect (Recommended)</option>
+                            <option value="english">English</option>
+                            <option value="vietnamese">Vietnamese</option>
+                            <option value="chinese">Chinese</option>
+                            <option value="japanese">Japanese</option>
+                            <option value="korean">Korean</option>
+                            <option value="spanish">Spanish</option>
+                            <option value="french">French</option>
+                            <option value="german">German</option>
+                            <option value="arabic">Arabic</option>
+                            <option value="russian">Russian</option>
+                        </select>
+                        <small>Language for AI-generated replies</small>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn">Save System Settings</button>
+                    </div>
+                </div>
+
+                <!-- Live Captions (Speech to Text ASR) Settings -->
+                <div class="section">
+                    <h2>
+                        <div class="section-icon">🎙️</div>
+                        Live Captions (ASR)
+                    </h2>
+                    <div class="form-group">
+                        <label for="ltAsrEngine">ASR Speech Engine</label>
+                        <select id="ltAsrEngine">
+                            <option value="groq" selected>Groq Whisper (Premium, Low-latency Tab Audio)</option>
+                            <option value="whisper">OpenAI Whisper (Premium, High-accuracy Tab Audio)</option>
+                        </select>
+                        <small>Whisper engines capture pure digital audio directly from the Chrome video/tab without using your physical microphone. Premium API keys are required.</small>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn">Save ASR Settings</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+  </div><!-- /.main-area -->
+</div><!-- /.page-wrapper -->
+
+<div style="text-align:center;padding:12px 16px;font-size:11px;color:var(--text-dim);border-top:1px solid var(--border);background:var(--bg-0);">
+  50 free uses per day · Resets at 0h UTC · AutoMind
+</div>
+
+<script src="options.js"></script>
+</body>
+</html>
