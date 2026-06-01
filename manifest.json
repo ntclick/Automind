@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoMind - AI Reply for X",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "AutoMind: Smart AI replies for X.com posts. Multi-language support with built-in translation. 50 free uses per day.",
 
   "icons": {
