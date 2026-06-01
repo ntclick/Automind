@@ -1,182 +1,93 @@
-# AutoMind - AI Reply for X/Twitter
+# AutoMind - AI Reply & Live Translator for X (Twitter)
 
-🚀 **Extension tạo comment AI thông minh cho Twitter/X với giao diện hiện đại và danh sách model đầy đủ**
-
-## ✨ Tính năng mới
-
-### 🎨 UI/UX được cải thiện
-- **Giao diện hiện đại** với animations mượt mà
-- **Loading states** với feedback trực quan
-- **Haptic feedback** cho các tương tác
-- **Responsive design** cho mọi kích thước màn hình
-- **Color-coded status** và progress bars
-
-### 🤖 AI Integration
-- **Multiple AI Providers**: OpenAI, Claude, Gemini, Local APIs
-- **Smart Comment Generation**: Context-aware responses
-- **Tone Customization**: Professional, Casual, Sarcastic, Witty, Concise
-
-### 🔧 Cải thiện lưu/load dữ liệu
-- **Async/await** cho tất cả operations
-- **Error handling** toàn diện
-- **Parallel loading** cho performance tốt hơn
-- **Validation** dữ liệu trước khi lưu
-- **Fallback mechanisms** khi có lỗi
-
-## 🚀 Cài đặt
-
-### 🔧 Manual Installation (Development)
-
-Chỉ dành cho developers:
-
-```bash
-git clone <repository-url>
-cd ai-reply-generator
-```
-
-**Load extension vào Chrome**:
-- Mở Chrome và vào `chrome://extensions/`
-- Bật "Developer mode"
-- Click "Load unpacked" và chọn thư mục extension
-
-**Cấu hình API Key**:
-- Click vào icon extension
-- Click "Setup API Key"
-- Chọn provider và nhập API key
-
-## 🎯 Cách sử dụng
-
-### 1. Cấu hình API Key
-- Chọn AI provider (OpenAI, Claude, Gemini, Local)
-- Nhập API key tương ứng
-- Test kết nối để đảm bảo hoạt động
-
-### 2. Chọn Tone
-- **Professional**: Chuyên nghiệp
-- **Casual**: Thân thiện
-- **Sarcastic**: Mỉa mai
-- **Witty**: Thông minh
-- **Concise**: Ngắn gọn
-
-### 3. Sử dụng trên Twitter/X
-- Vào Twitter/X
-- Extension sẽ tự động inject buttons
-- Click vào button AI để tạo comment
-- Chọn tone và copy comment
-
-## 🔧 Cấu hình nâng cao
-
-### API Keys
-```javascript
-// OpenAI
-OPENAI_API_KEY=sk-...
-
-// Claude
-CLAUDE_API_KEY=sk-ant-...
-
-// Gemini
-GEMINI_API_KEY=AIza...
-
-// Local (nếu có)
-LOCAL_ENDPOINT=http://localhost:8000
-```
-
-### Settings
-- **Daily Quota**: Giới hạn số lần sử dụng mỗi ngày
-- **Auto-inject**: Tự động hiển thị buttons
-- **Language**: Tự động detect ngôn ngữ
-- **Notifications**: Thông báo khi hoàn thành
-
-## 📊 Monitoring
-
-### Usage Statistics
-- **Daily Usage**: Số lần sử dụng hôm nay
-- **Total Usage**: Tổng số lần sử dụng
-- **Quota Status**: Trạng thái quota
-- **Model Performance**: Hiệu suất của từng model
-
-### Error Handling
-- **Network Errors**: Tự động retry
-- **API Errors**: Hiển thị thông báo lỗi chi tiết
-- **Quota Exceeded**: Thông báo khi hết quota
-- **Invalid API Key**: Hướng dẫn cấu hình lại
-
-## 🎨 UI Features
-
-### Popup Interface
-- **Real-time stats** với animations
-- **Model selection** trực quan
-- **Quick settings** với toggles
-- **Status indicators** với màu sắc
-
-### Options Page
-- **API Key configuration**
-- **Tone selection** với descriptions
-- **Language preferences**
-
-### Visual Indicators
-- **✅ Active**: Extension hoạt động
-- **⚠️ Warning**: Cần cấu hình API key
-- **❌ Error**: Lỗi kết nối
-- **📊 Usage**: Thống kê sử dụng
-
-## 🔒 Privacy & Security
-
-- **Local Storage**: Dữ liệu được lưu locally
-- **No Data Collection**: Không thu thập dữ liệu cá nhân
-- **API Key Security**: Keys được mã hóa
-- **HTTPS Only**: Chỉ kết nối HTTPS
-
-## 🐛 Troubleshooting
-
-### Common Issues
-1. **API Key Invalid**: Kiểm tra lại API key
-2. **Quota Exceeded**: Tăng quota hoặc đợi ngày mai
-3. **Network Error**: Kiểm tra kết nối internet
-4. **Extension Not Working**: Reload extension
-
-### Debug Mode
-```javascript
-// Mở DevTools và chạy
-console.log('Extension Debug Mode');
-```
-
-## 📈 Performance
-
-### Optimizations
-- **Parallel Loading**: Load nhiều data cùng lúc
-- **Caching**: Cache model lists và settings
-- **Lazy Loading**: Load data khi cần
-- **Error Recovery**: Tự động khôi phục khi lỗi
-
-### Benchmarks
-- **Popup Load**: < 500ms
-- **Model Selection**: < 200ms
-- **Comment Generation**: < 10s
-- **Settings Save**: < 100ms
-
-## 🤝 Contributing
-
-1. **Fork** repository
-2. **Create** feature branch
-3. **Commit** changes
-4. **Push** to branch
-5. **Create** Pull Request
-
-## 📄 License
-
-MIT License - xem file [LICENSE.md](LICENSE.md) để biết thêm chi tiết.
-
-## 🙏 Acknowledgments
-
-- **OpenAI** cho GPT models
-- **Anthropic** cho Claude models
-- **Google** cho Gemini models
-- **Meta** cho Llama models
-- **Mistral AI** cho Mistral models
+🚀 **The ultimate dual-powered browser assistant for X.com: Generate smart, context-aware AI replies and translate live tab audio (Spaces, live streams, videos) into real-time Vietnamese subtitles inside a convenient Side Panel.**
 
 ---
 
-**Made with ❤️ for Vietnamese users**
+## ✨ Features
 
-**Powered by Claude AI**
+### 🎙️ 1. Live Stream Captions & Translation
+Never miss a word in any active tab audio. AutoMind captures tab audio stream and translates speech into real-time subtitles:
+* **Docked Side Panel**: View streaming subtitles comfortably right next to your timeline.
+* **X Spaces & Live Video Translation**: Instantly translate spoken English into natural, fluent Vietnamese.
+* **Ultra-Low Latency ASR**: Integrates with high-performance speech engines (Groq Whisper, OpenAI Whisper) for gapless audio capture.
+* **Text-to-Speech (TTS) Voice Readout**: Optional audio output for accessibility, reading translated sentences aloud.
+* **Mute Tab Sync**: Automatically mutes the tab audio when TTS is enabled to prevent overlapping audio playback.
+
+### 🚀 2. AI Smart Replies for X.com
+Stand out in any conversation on X with highly contextual, engaging replies:
+* **One-Click Comment Generation**: Automatically drafts comment suggestions based on the post thread.
+* **Customizable Tones**: Professional, Casual, Sarcastic, Witty, Concise, or Analytical (tailored for Web3/Crypto community vibes).
+* **Smart Language Detection**: Automatically analyzes the source language of the post and drafts the reply in the exact same language.
+* **Leading AI Models**: Flexible backend routing using OpenAI (GPT-4o/mini), Anthropic (Claude 3.5 Sonnet), Google (Gemini 1.5 Pro/Flash), DeepSeek, Kimi, or Local APIs.
+
+---
+
+## 🚀 Installation & Setup
+
+### 📥 Cloning to Your **Downloads** Folder
+If you want to quickly clone this repository straight to your computer's **Downloads** folder, copy and paste the appropriate command below into your command-line interface:
+
+#### **Option A: For PowerShell** (Recommended on Windows)
+```powershell
+cd "$env:USERPROFILE\Downloads"; git clone https://github.com/ntclick/Automind.git
+```
+
+#### **Option B: For Command Prompt (CMD)**
+```cmd
+cd %USERPROFILE%\Downloads && git clone https://github.com/ntclick/Automind.git
+```
+
+---
+
+### 🔧 Load the Extension into Google Chrome
+
+Once the repository is cloned:
+1. Open Google Chrome and navigate to `chrome://extensions/`.
+2. Enable the **"Developer mode"** toggle in the top-right corner.
+3. Click the **"Load unpacked"** button in the top-left.
+4. Select the `Automind` folder located inside your **Downloads** directory.
+5. AutoMind will now be active in your extension bar!
+
+---
+
+## 🎯 How to Use
+
+### 1. Configuration (Optional: Bring Your Own Key)
+* AutoMind provides **50 free daily uses** out of the box via our secure Cloudflare proxy.
+* If you require unlimited uses, click the extension icon, navigate to **Settings**, and toggle on **"Use Own API Key"** to enter your OpenAI, Anthropic, or Groq API Keys.
+
+### 2. Crafting AI Replies on X.com
+* Open [X.com](https://x.com) (Twitter).
+* The extension programmatically injects AI action buttons directly beneath posts.
+* Click the **AI Button**, select your desired **Tone**, and watch the extension generate a contextual draft response in seconds.
+
+### 3. Capturing Live Captions & Spaces
+* Open any tab containing live audio (e.g., an X Space, a YouTube video, or a podcast).
+* Click the **AutoMind** extension icon and click **"Start Live Captions"**.
+* A secure launch overlay will prompt a single click to authorize browser audio capture.
+* The Chrome **Side Panel** will automatically open next to your tab, rendering real-time translation subtitles!
+
+---
+
+## 🔒 Privacy & Security
+
+* **Zero Tracking**: AutoMind does NOT track your browsing history or require your Twitter/X credentials.
+* **Local Storage**: All user settings, configurations, and caption history are stored 100% locally on your machine using `chrome.storage.local`.
+* **ASR Audio Transit**: Audio segments are processed transiently in memory to output text. **No raw audio files or recording logs are ever permanently saved, stored, or distributed.**
+
+---
+
+## 🤝 Contributing
+
+1. **Fork** the repository.
+2. **Create** your feature branch (`git checkout -b feature/AmazingFeature`).
+3. **Commit** your changes (`git commit -m 'Add some AmazingFeature'`).
+4. **Push** to the branch (`git push origin feature/AmazingFeature`).
+5. **Open** a Pull Request.
+
+---
+
+## 📄 License
+
+Distributed under the MIT License. See [LICENSE.md](LICENSE.md) for more information.
