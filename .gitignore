@@ -1,1 +1,4 @@
 shared/secrets.js
+
+# Build artifacts — 15MB of packaged releases, rebuilt from source
+*.zip

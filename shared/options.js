@@ -16,16 +16,32 @@ class UserSettings {
         if (!radios.length) return;
 
         const customSection = document.getElementById('customAiSection');
-        const apiKeysSection = document.getElementById('apiKeysSection');
+        const routingSection = document.getElementById('taskRoutingSection');
+        // The Live Captions section stays visible in both modes — its free
+        // Web Speech engine needs no API key, so hiding it would strand
+        // free-tier users with no way to pick an engine.
 
         // Expose for save handlers to flip UI without reload
         this._applyAiMode = (mode) => {
             const isCustom = mode === 'custom';
             if (customSection)  customSection.style.display  = isCustom ? '' : 'none';
-            if (apiKeysSection) apiKeysSection.style.display = isCustom ? '' : 'none';
+            // Task routing only applies with user-provided keys
+            if (routingSection) routingSection.style.display = isCustom ? '' : 'none';
             const target = document.querySelector(`input[name="aiMode"][value="${mode}"]`);
             if (target) target.checked = true;
-            chrome.storage.sync.set({ aiMode: mode });
+
+            // Switching to Free tier must also clear a stale model from the
+            // previous provider. Leaving e.g. "deepseek-v4-flash" behind made the
+            // extension send it to OpenAI, which 404s and drops every generation
+            // to canned fallback replies.
+            const patch = { aiMode: mode };
+            if (mode === 'system') {
+                patch.apiProvider = 'openai';
+                patch.selectedModel = 'gpt-4o-mini';
+            }
+            chrome.storage.sync.set(patch);
+
+            if (this.refreshTaskMap) this.refreshTaskMap();
         };
 
         radios.forEach(radio => {
@@ -114,6 +130,7 @@ class UserSettings {
                 }
                 checkbox.checked = !checkbox.checked;
                 this.updateToneSelection();
+                this.saveUserSettings();
             });
         });
 
@@ -128,6 +145,7 @@ class UserSettings {
                     }
                 }
                 this.updateToneSelection();
+                this.saveUserSettings();
             });
         });
 
@@ -170,99 +188,262 @@ class UserSettings {
             });
         });
 
-        // Save buttons event listeners with better targeting
-        document.querySelectorAll('.btn').forEach(btn => {
+        // Button dispatch keyed on data-action. Renaming a button label no longer
+        // silently detaches its handler, which is what the old textContent
+        // matching did.
+        const ACTIONS = {
+            'save-openai':   () => this.saveOpenAISettings(),
+            'save-claude':   () => this.saveClaudeSettings(),
+            'save-gemini':   () => this.saveGeminiSettings(),
+            'save-kimi':     () => this.saveKimiSettings(),
+            'save-deepseek': () => this.saveDeepSeekSettings(),
+            'save-nvidia':   () => this.saveNvidiaSettings(),
+            'save-groq':     () => this.saveGroqSettings(),
+            'save-local':    () => this.saveLocalSettings(),
+            'save-all':      () => this.saveAllApiKeys(),
+            'test-openai':   () => this.testOpenAI(),
+            'test-claude':   () => this.testClaude(),
+            'test-gemini':   () => this.testGemini(),
+            'test-kimi':     () => this.testKimi(),
+            'test-deepseek': () => this.testDeepSeek(),
+            'test-nvidia':   () => this.testNvidia(),
+            'test-groq':     () => this.testGroq(),
+            'test-local':    () => this.testLocal(),
+            'test-all':      () => this.testAllApiKeys(),
+            'goto-keys':     () => {
+                const nav = document.querySelector('.nav-item[data-main-tab="keys"]');
+                if (nav) nav.click();
+            },
+            'reset':         () => this.resetToDefaults()
+        };
+
+        document.querySelectorAll('[data-action]').forEach(btn => {
+            const action = btn.getAttribute('data-action');
+            const handler = ACTIONS[action];
+            if (!handler) return;
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
-                const buttonText = btn.textContent.toLowerCase().trim();
-                console.log('🔘 Button clicked:', buttonText, 'Element:', btn);
-                
-                if (buttonText.includes('save tone') || buttonText.includes('save tone settings')) {
-                    console.log('🎭 Save tone button clicked!');
-                    this.saveUserSettings();
-                } else if (buttonText.includes('save language')) {
-                    console.log('🌐 Save language button clicked!');
-                    this.saveLanguageSettings();
-                } else if (buttonText.includes('save character')) {
-                    console.log('👤 Save character button clicked!');
-                    this.saveCharacterSettings();
-                } else if (buttonText.includes('save model')) {
-                    console.log('🤖 Save model button clicked!');
-                    this.saveModelSettings();
-                } else if (buttonText.includes('save system')) {
-                    console.log('⚙️ Save system button clicked!');
-                    this.saveSystemSettings();
-                } else if (buttonText.includes('save openai')) {
-                    console.log('🤖 Save OpenAI button clicked!');
-                    this.saveOpenAISettings();
-                } else if (buttonText.includes('save claude')) {
-                    console.log('🧠 Save Claude button clicked!');
-                    this.saveClaudeSettings();
-                } else if (buttonText.includes('save gemini')) {
-                    console.log('💎 Save Gemini button clicked!');
-                    this.saveGeminiSettings();
-                } else if (buttonText.includes('save kimi')) {
-                    console.log('🌙 Save Kimi button clicked!');
-                    this.saveKimiSettings();
-                } else if (buttonText.includes('save deepseek')) {
-                    console.log('💾 Save DeepSeek button clicked!');
-                    this.saveDeepSeekSettings();
-                } else if (buttonText.includes('save nvidia')) {
-                    console.log('💾 Save NVIDIA button clicked!');
-                    this.saveNvidiaSettings();
-                } else if (buttonText.includes('save groq')) {
-                    console.log('⚡ Save Groq button clicked!');
-                    this.saveGroqSettings();
-                } else if (buttonText.includes('save local')) {
-                    console.log('🏠 Save Local button clicked!');
-                    this.saveLocalSettings();
-                } else if (buttonText.includes('save asr')) {
-                    console.log('🎙️ Save ASR button clicked!');
-                    this.saveAsrSettings();
-                } else if (buttonText.includes('save all')) {
-                    console.log('💾 Save all button clicked!');
-                    this.saveAllApiKeys();
-                }
+                console.log('🔘 Action:', action);
+                handler();
             });
         });
 
-        // Test buttons event listeners
-        document.querySelectorAll('.btn-secondary').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.preventDefault();
-                const buttonText = btn.textContent.toLowerCase();
-                
-                if (buttonText.includes('test connection')) {
-                    this.testModelConnection();
-                } else if (buttonText.includes('test openai')) {
-                    this.testOpenAI();
-                } else if (buttonText.includes('test claude')) {
-                    this.testClaude();
-                } else if (buttonText.includes('test gemini')) {
-                    this.testGemini();
-                } else if (buttonText.includes('test kimi')) {
-                    this.testKimi();
-                } else if (buttonText.includes('test deepseek')) {
-                    this.testDeepSeek();
-                } else if (buttonText.includes('test nvidia')) {
-                    this.testNvidia();
-                } else if (buttonText.includes('test groq')) {
-                    this.testGroq();
-                } else if (buttonText.includes('test local')) {
-                    this.testLocal();
-                } else if (buttonText.includes('test all')) {
-                    this.testAllApiKeys();
-                } else if (buttonText.includes('reset')) {
-                    this.resetToDefaults();
-                }
-            });
-        });
+        this.setupAutoSave();
+        this.setupProviderAccordion();
+        this.setupTonePresets();
 
         // Setup main tab navigation
         this.setupMainTabNavigation();
         
         // Setup provider tab navigation
         this.setupTabNavigation();
+    }
+
+    /**
+     * Everything that isn't an API key saves the instant it changes, so there
+     * is no "did I remember to hit Save?" state to worry about. API keys keep
+     * an explicit Save button because they pair with a Test action.
+     */
+    setupAutoSave() {
+        const bind = (id, handler) => {
+            const el = document.getElementById(id);
+            if (!el || el._autoSaveBound) return;
+            el._autoSaveBound = true;
+            el.addEventListener('change', handler);
+        };
+
+        bind('commentLength', async () => {
+            await chrome.storage.sync.set({ commentLength: document.getElementById('commentLength').value });
+            this.showAlert('Reply length saved.', 'success');
+        });
+
+        bind('replyLanguage', async () => {
+            await chrome.storage.sync.set({ language: document.getElementById('replyLanguage').value });
+            this.showAlert('Reply language saved.', 'success');
+        });
+
+        bind('dailyQuota', async () => {
+            const raw = parseInt(document.getElementById('dailyQuota').value, 10);
+            const quota = Number.isFinite(raw) ? Math.min(1000, Math.max(0, raw)) : 50;
+            document.getElementById('dailyQuota').value = quota;
+            await chrome.storage.sync.set({ dailyQuota: quota });
+            this.showAlert(`Daily limit set to ${quota}.`, 'success');
+        });
+
+        // Subtitle translation engine. Stored in storage.local because the side
+        // panel owns the same key — writing it here syncs the panel live.
+        bind('ltEngine', async () => {
+            const v = document.getElementById('ltEngine').value;
+            await chrome.storage.local.set({ ltEngine: v });
+            this.showAlert(v === 'google'
+                ? 'Subtitles will use Google Translate (free, no quota).'
+                : 'Subtitles will use Premium AI.', 'success');
+            this.refreshTaskMap();
+        });
+    }
+
+    /**
+     * Paint the "What powers each task" summary. The three jobs genuinely run on
+     * different engines — replies go through the AI provider, subtitle text goes
+     * through the translation engine, and audio goes through the ASR engine — so
+     * showing one blanket "provider" would be wrong.
+     */
+    async refreshTaskMap() {
+        const set = (engineId, tagId, engineText, tagText, tagClass) => {
+            const e = document.getElementById(engineId);
+            const t = document.getElementById(tagId);
+            if (e) e.textContent = engineText;
+            if (t) { t.textContent = tagText; t.className = 'task-tag ' + (tagClass || ''); }
+        };
+
+        const PROVIDER_LABEL = {
+            openai: 'OpenAI', claude: 'Claude', gemini: 'Gemini', kimi: 'Kimi',
+            deepseek: 'DeepSeek', nvidia: 'NVIDIA NIM', local: 'Local AI Server'
+        };
+        // Mirrors background.js — this panel must show the model that will
+        // ACTUALLY be sent, not a stale value left over from another provider.
+        const MODEL_PREFIXES = {
+            openai: [/^gpt-/i, /^o[1-9]/i], claude: [/^claude-/i], gemini: [/^gemini-/i],
+            kimi: [/^moonshot-/i, /^kimi-/i], deepseek: [/^deepseek-/i], nvidia: [/\//], local: [/./]
+        };
+        const DEFAULT_MODELS = {
+            claude: 'claude-haiku-4-5-20251001', openai: 'gpt-4o-mini',
+            gemini: 'gemini-3.1-flash-preview', kimi: 'moonshot-v1-32k',
+            deepseek: 'deepseek-v4-flash', nvidia: 'nvidia/llama-3.1-nemotron-51b-instruct',
+            local: 'auto'
+        };
+        const resolveModel = (model, provider) => {
+            const rules = MODEL_PREFIXES[provider];
+            if (model && (!rules || rules.some(re => re.test(model)))) return model;
+            return DEFAULT_MODELS[provider] || 'gpt-4o-mini';
+        };
+
+        try {
+            const s = await chrome.storage.sync.get([
+                'aiMode', 'apiProvider', 'selectedModel', 'ltAsrEngine',
+                'writeProvider', 'writeModel', 'translateProvider', 'translateModel',
+                'tldrProvider', 'tldrGroqModel', 'tldrOpenaiModel',
+                'groqApiKey', 'openaiApiKey'
+            ]);
+            const local = await chrome.storage.local.get(['ltEngine']);
+
+            const isFree = (s.aiMode || 'system') !== 'custom';
+            const mainProvider = isFree ? 'openai' : (s.apiProvider || 'openai');
+            const mainModel = isFree ? 'gpt-4o-mini' : (s.selectedModel || 'default model');
+
+            const describe = (routedProvider, routedModel) => {
+                if (isFree) return 'OpenAI · gpt-4o-mini · via AutoMind (key included)';
+                const p = routedProvider || mainProvider;
+                const m = resolveModel(routedModel || (routedProvider ? '' : mainModel), p);
+                return `${PROVIDER_LABEL[p] || p} · ${m}`;
+            };
+
+            // 1 — Reply generation
+            set('taskEngineWrite', 'taskTagWrite',
+                describe(s.writeProvider, s.writeModel),
+                isFree ? '50 / day' : 'your key',
+                isFree ? 'quota' : 'own');
+
+            // 2 — Subtitle translation
+            const ltEngine = local.ltEngine || 'google';
+            if (ltEngine === 'google') {
+                set('taskEngineTranslate', 'taskTagTranslate',
+                    'Google Translate · no key, no quota', 'free', 'free');
+            } else {
+                set('taskEngineTranslate', 'taskTagTranslate',
+                    describe(s.translateProvider, s.translateModel),
+                    isFree ? '50 / day' : 'your key',
+                    isFree ? 'quota' : 'own');
+            }
+
+            // 3 — Speech recognition (and flag a missing key rather than failing at start)
+            const asr = s.ltAsrEngine || 'groq';
+            const warn = document.getElementById('asrKeyWarning');
+            let warnText = '';
+            if (asr === 'webSpeech') {
+                set('taskEngineAsr', 'taskTagAsr', "Chrome Web Speech · uses your microphone", 'free', 'free');
+            } else if (asr === 'groq') {
+                const ok = !!(s.groqApiKey || '').trim();
+                set('taskEngineAsr', 'taskTagAsr', 'Groq Whisper Large v3 · tab audio',
+                    ok ? 'your key' : 'key missing', ok ? 'own' : 'warn');
+                if (!ok) warnText = 'No Groq key saved yet — live captions will not start. Add it on the API Keys tab, or switch to Web Speech API (free).';
+            } else {
+                const ok = !!(s.openaiApiKey || '').trim();
+                set('taskEngineAsr', 'taskTagAsr', 'OpenAI Whisper · tab audio',
+                    ok ? 'your key' : 'key missing', ok ? 'own' : 'warn');
+                if (!ok) warnText = 'No OpenAI key saved yet — live captions will not start. Add it on the API Keys tab, or switch to Web Speech API (free).';
+            }
+            if (warn) {
+                warn.textContent = warnText;
+                warn.style.display = warnText ? 'block' : 'none';
+            }
+
+            // 4 — Video TLDR → post (always the user's own Groq/OpenAI key —
+            // transcripts are too long for the free-tier proxy)
+            const tldrProvider = s.tldrProvider === 'openai' ? 'openai' : 'groq';
+            if (tldrProvider === 'groq') {
+                const ok = !!(s.groqApiKey || '').trim();
+                set('taskEngineTldr', 'taskTagTldr',
+                    `Groq · ${s.tldrGroqModel || 'llama-3.3-70b-versatile'} · captions transcript`,
+                    ok ? 'your key' : 'key missing', ok ? 'own' : 'warn');
+            } else {
+                const ok = !!(s.openaiApiKey || '').trim();
+                set('taskEngineTldr', 'taskTagTldr',
+                    `OpenAI · ${s.tldrOpenaiModel || 'gpt-4o-mini'} · captions transcript`,
+                    ok ? 'your key' : 'key missing', ok ? 'own' : 'warn');
+            }
+        } catch (e) {
+            console.warn('⚠️ Could not refresh task map:', e);
+        }
+
+        // The audit panel answers the same question one tab over, so it must
+        // never lag behind this one.
+        this.renderKeyAudit();
+    }
+
+    /** Expand/collapse provider cards so seven providers aren't all open at once. */
+    setupProviderAccordion() {
+        document.querySelectorAll('.provider-row').forEach(row => {
+            const header = row.querySelector('.provider-row-header');
+            if (!header) return;
+            header.addEventListener('click', (e) => {
+                // The radio and its label pick the active provider — don't toggle on those
+                if (e.target.closest('.provider-row-radio') || e.target.closest('.provider-row-title')) return;
+                row.classList.toggle('open');
+            });
+        });
+
+        // Auto-open whichever provider is currently active so the key is visible
+        const active = document.querySelector('input[name="activeProvider"]:checked');
+        if (active) {
+            const row = document.querySelector(`.provider-row[data-provider="${active.value}"]`);
+            if (row) row.classList.add('open');
+        }
+    }
+
+    /** Green dot on a provider row = a key is stored for it. */
+    refreshKeyDots() {
+        document.querySelectorAll('.key-dot[data-key-for]').forEach(dot => {
+            const input = document.getElementById(dot.getAttribute('data-key-for'));
+            const hasValue = !!(input && input.value && input.value.trim());
+            dot.classList.toggle('set', hasValue);
+            dot.title = hasValue ? 'Key saved' : 'No key yet';
+        });
+    }
+
+    setupTonePresets() {
+        const starter = document.getElementById('tonePresetStarter');
+        const clear = document.getElementById('tonePresetClear');
+        const setTones = (tones) => {
+            document.querySelectorAll('.tone-checkbox input[type="checkbox"]').forEach(cb => {
+                cb.disabled = false;
+                cb.checked = tones.includes(cb.value);
+            });
+            this.updateToneSelection();
+            this.saveUserSettings();
+        };
+        if (starter) starter.addEventListener('click', () => setTones(['professional', 'casual', 'witty', 'analytical', 'contrarian']));
+        if (clear) clear.addEventListener('click', () => setTones([]));
     }
 
     // Setup main tab navigation
@@ -285,39 +466,81 @@ class UserSettings {
         });
     }
 
-    // Setup provider tab navigation
+    // Setup provider list event handlers and radios
     setupTabNavigation() {
-        const tabButtons = document.querySelectorAll('.tab-btn');
-        const tabContents = document.querySelectorAll('.tab-content');
-
-        tabButtons.forEach(button => {
-            button.addEventListener('click', () => {
-                const targetTab = button.getAttribute('data-tab');
-
-                tabButtons.forEach(btn => btn.classList.remove('active'));
-                tabContents.forEach(content => content.classList.remove('active'));
-
-                button.classList.add('active');
-                const tabContent = document.getElementById(`${targetTab}-tab`);
-                if (tabContent) tabContent.classList.add('active');
-
-                // Two-way sync: clicking a provider tab makes that provider the active one
-                // (only meaningful in custom mode; harmless in system mode).
-                const providerTabs = ['openai', 'claude', 'gemini', 'kimi', 'deepseek', 'nvidia', 'local'];
-                if (providerTabs.includes(targetTab)) {
-                    const providerSelect = document.getElementById('apiProvider');
-                    if (providerSelect && providerSelect.value !== targetTab) {
-                        providerSelect.value = targetTab;
-                        // Repopulate model dropdown for new provider
-                        if (typeof this.updateModelOptions === 'function') {
-                            this.updateModelOptions(targetTab);
+        // Handle radio button changes explicitly setting active provider
+        const radios = document.querySelectorAll('input[name="activeProvider"]');
+        radios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (radio.checked) {
+                    const provider = radio.value;
+                    this.updateActiveProviderUI(provider);
+                    
+                    // Save active provider and mirror the selected model for that provider
+                    chrome.storage.sync.set({ apiProvider: provider });
+                    
+                    // Determine which model dropdown to read from
+                    let modelKey = `${provider}Model`;
+                    if (provider === 'local') modelKey = 'localModel';
+                    
+                    const modelDropdown = document.getElementById(modelKey);
+                    if (modelDropdown) {
+                        chrome.storage.sync.set({ selectedModel: modelDropdown.value });
+                        // Sync DOM hidden element too for compatibility
+                        const hiddenModelSelect = document.getElementById('selectedModel');
+                        if (hiddenModelSelect) {
+                            hiddenModelSelect.innerHTML = `<option value="${modelDropdown.value}" selected>${modelDropdown.value}</option>`;
                         }
                     }
-                    // Persist active provider
-                    chrome.storage.sync.set({ apiProvider: targetTab });
                 }
             });
         });
+
+        // Also add change listeners to the individual model dropdowns to sync selectedModel
+        const modelSelectors = ['openaiModel', 'claudeModel', 'geminiModel', 'kimiModel', 'deepseekModel', 'nvidiaModel', 'localModel'];
+        modelSelectors.forEach(selectorId => {
+            const el = document.getElementById(selectorId);
+            if (el) {
+                el.addEventListener('change', () => {
+                    // Only update selectedModel in storage if this dropdown belongs to the currently active provider
+                    const activeRadio = document.querySelector('input[name="activeProvider"]:checked');
+                    const provider = activeRadio ? activeRadio.value : '';
+                    const expectedPrefix = selectorId.toLowerCase();
+                    if (expectedPrefix.startsWith(provider)) {
+                        chrome.storage.sync.set({ selectedModel: el.value });
+                        // Sync DOM hidden element too for compatibility
+                        const hiddenModelSelect = document.getElementById('selectedModel');
+                        if (hiddenModelSelect) {
+                            hiddenModelSelect.innerHTML = `<option value="${el.value}" selected>${el.value}</option>`;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // Helper to update active provider UI styling and check states
+    updateActiveProviderUI(provider) {
+        if (!provider) return;
+        
+        // Check the correct radio button
+        const radio = document.querySelector(`input[name="activeProvider"][value="${provider}"]`);
+        if (radio) radio.checked = true;
+
+        // Toggle active class on rows, and expand the active one so its key is visible
+        document.querySelectorAll('.provider-row').forEach(row => {
+            const isActive = row.getAttribute('data-provider') === provider;
+            row.classList.toggle('active', isActive);
+            if (isActive) row.classList.add('open');
+        });
+
+        // Update hidden select for legacy compatibility
+        const hiddenSelect = document.getElementById('apiProvider');
+        if (hiddenSelect) {
+            hiddenSelect.value = provider;
+        }
+
+        if (this.refreshTaskMap) this.refreshTaskMap();
     }
 
     setupAdditionalEventListeners() {
@@ -469,9 +692,12 @@ class UserSettings {
     async saveUserSettings() {
         console.log('💾 Starting to save user settings...');
         try {
-            const defaultTone = document.getElementById('defaultTone').value;
-            console.log('📝 Default tone:', defaultTone);
-            
+            // defaultTone / preferredLanguage were removed from the UI (they
+            // duplicated the tone grid and the Reply Language select). Read them
+            // defensively so this keeps working with or without those elements.
+            const defaultToneEl = document.getElementById('defaultTone');
+            const preferredLanguageEl = document.getElementById('preferredLanguage');
+
             // Get selected tones from checkboxes
             const selectedTones = [];
             const toneCheckboxes = document.querySelectorAll('.tone-checkbox input[type="checkbox"]:checked');
@@ -494,9 +720,9 @@ class UserSettings {
             }
 
             const userSettings = {
-                defaultTone: defaultTone,
+                defaultTone: defaultToneEl ? defaultToneEl.value : (selectedTones[0] || 'professional'),
                 selectedTones: selectedTones,
-                preferredLanguage: document.getElementById('preferredLanguage').value
+                preferredLanguage: preferredLanguageEl ? preferredLanguageEl.value : 'auto'
             };
 
             console.log('💾 Saving to storage:', userSettings);
@@ -508,7 +734,7 @@ class UserSettings {
             });
 
             console.log('✅ Storage save completed');
-            this.showAlert('User settings saved successfully!', 'success');
+            this.showAlert(`Saved — ${selectedTones.length} tone${selectedTones.length === 1 ? '' : 's'} active.`, 'success');
             console.log('✅ User settings saved:', userSettings);
         } catch (error) {
             console.error('❌ Error saving user settings:', error);
@@ -519,8 +745,9 @@ class UserSettings {
     // Save Language Settings
     async saveLanguageSettings() {
         try {
+            const el = document.getElementById('preferredLanguage') || document.getElementById('replyLanguage');
             const languageSettings = {
-                preferredLanguage: document.getElementById('preferredLanguage').value
+                preferredLanguage: el ? el.value : 'auto'
             };
 
             await chrome.storage.sync.set({
@@ -603,16 +830,18 @@ class UserSettings {
                 { value: 'deepseek-reasoner', text: 'deepseek-reasoner (legacy alias)' }
             ],
             nvidia: [
-                { value: 'minimaxai/minimax-m2.7', text: 'MiniMax M2.7 (Reasoning)' },
-                { value: 'meta/llama-4-maverick-17b-128e-instruct', text: 'Llama 4 Maverick 17B' },
-                { value: 'step-3.5-flash', text: 'Step 3.5 Flash' },
-                { value: 'mistralai/mistral-large-3-675b-instruct-2512', text: 'Mistral Large 3 (675B)' },
-                { value: 'mistralai/mistral-nemotron', text: 'Mistral Nemotron' },
-                { value: 'qwen/qwen3-coder-480b-a35b-instruct', text: 'Qwen 3 Coder 480B' },
-                { value: 'google/gemma-3-27b-it', text: 'Gemma 3 27B IT' },
-                { value: 'moonshotai/kimi-k2-instruct', text: 'Kimi K2 Instruct' },
-                { value: 'moonshotai/kimi-k2-thinking', text: 'Kimi K2 Thinking' },
-                { value: 'z.ai/glm-4.7', text: 'GLM 4.7' }
+                { value: 'nvidia/llama-3.1-nemotron-51b-instruct', text: 'NVIDIA Llama 3.1 Nemotron 51B Instruct (recommended)' },
+                { value: 'meta/llama-3.3-70b-instruct', text: 'Meta Llama 3.3 70B Instruct (high quality)' },
+                { value: 'meta/llama-3.1-70b-instruct', text: 'Meta Llama 3.1 70B Instruct' },
+                { value: 'meta/llama-3.1-8b-instruct', text: 'Meta Llama 3.1 8B Instruct' },
+                { value: 'meta/llama-3.1-405b-instruct', text: 'Meta Llama 3.1 405B Instruct' },
+                { value: 'mistralai/mistral-large-2-instruct', text: 'Mistral Large 2 Instruct' },
+                { value: 'mistralai/mistral-nemo-12b-instruct', text: 'Mistral Nemo 12B Instruct' },
+                { value: 'google/gemma-2-27b-it', text: 'Google Gemma 2 27B IT' },
+                { value: 'google/gemma-2-9b-it', text: 'Google Gemma 2 9B IT' },
+                { value: 'qwen/qwen-2.5-72b-instruct', text: 'Qwen 2.5 72B Instruct' },
+                { value: 'qwen/qwen-2.5-coder-32b-instruct', text: 'Qwen 2.5 Coder 32B Instruct' },
+                { value: 'microsoft/phi-3-medium-128k-instruct', text: 'Microsoft Phi-3 Medium' }
             ],
             local: [
                 { value: 'auto',        text: 'Auto-detect' },
@@ -700,13 +929,16 @@ class UserSettings {
     // Save System Settings
     async saveSystemSettings() {
         try {
+            // maxTokens / temperature / promptType were dropped from the UI —
+            // background.js never read them, so exposing them was misleading.
+            const val = (id, fallback) => {
+                const el = document.getElementById(id);
+                return el && el.value !== '' ? el.value : fallback;
+            };
             const systemSettings = {
-                dailyQuota: parseInt(document.getElementById('dailyQuota').value) || 50,
-                maxTokens: parseInt(document.getElementById('maxTokens').value) || 150,
-                temperature: parseFloat(document.getElementById('temperature').value) || 0.7,
-                promptType: document.getElementById('promptType').value || 'default',
-                commentLength: document.getElementById('commentLength').value || 'medium',
-                language: document.getElementById('replyLanguage').value || 'auto'
+                dailyQuota: parseInt(val('dailyQuota', 50), 10) || 50,
+                commentLength: val('commentLength', 'medium'),
+                language: val('replyLanguage', 'auto')
             };
 
             await chrome.storage.sync.set(systemSettings);
@@ -735,6 +967,7 @@ class UserSettings {
             }
             await chrome.storage.sync.set(settings);
             if (this._applyAiMode) this._applyAiMode('custom');
+            this.updateActiveProviderUI('openai');
             this.showAlert('OpenAI settings saved — OpenAI is now your active provider.', 'success');
         } catch (error) {
             this.showAlert('Error saving OpenAI settings', 'error');
@@ -812,6 +1045,7 @@ class UserSettings {
             }
             await chrome.storage.sync.set(settings);
             if (this._applyAiMode) this._applyAiMode('custom');
+            this.updateActiveProviderUI('claude');
             this.showAlert('Claude settings saved — Claude is now your active provider.', 'success');
         } catch (error) {
             this.showAlert('Error saving Claude settings', 'error');
@@ -875,10 +1109,12 @@ class UserSettings {
 
     async saveGeminiSettings() {
         try {
+            const model = document.getElementById('geminiModel').value;
             const settings = {
                 geminiApiKey: document.getElementById('geminiApiKey').value.trim(),
+                geminiModel: model,
                 apiProvider: 'gemini',
-                selectedModel: 'gemini-3.1-flash-preview',
+                selectedModel: model,
                 aiMode: 'custom'
             };
             if (!settings.geminiApiKey) {
@@ -887,6 +1123,7 @@ class UserSettings {
             }
             await chrome.storage.sync.set(settings);
             if (this._applyAiMode) this._applyAiMode('custom');
+            this.updateActiveProviderUI('gemini');
             this.showAlert('Gemini settings saved — Gemini is now your active provider.', 'success');
         } catch (error) {
             this.showAlert('Error saving Gemini settings', 'error');
@@ -897,8 +1134,9 @@ class UserSettings {
     async testGemini() {
         try {
             const apiKey = document.getElementById('geminiApiKey').value.trim();
+            const selectedGeminiModel = document.getElementById('geminiModel').value;
 
-            console.log('💎 [OPTIONS] Testing Gemini:', { hasApiKey: !!apiKey, apiKeyLength: apiKey.length });
+            console.log('💎 [OPTIONS] Testing Gemini:', { hasApiKey: !!apiKey, apiKeyLength: apiKey.length, selectedModel: selectedGeminiModel });
 
             if (!apiKey) {
                 this.showAlert('Please enter Gemini API Key first', 'error');
@@ -907,12 +1145,13 @@ class UserSettings {
 
             this.showAlert('Testing Gemini models...', 'warning');
 
-            // Test multiple models like in the test script - prioritize working ones
+            // Test multiple models - prioritize the user's selected model first!
             const modelsToTest = [
-                'gemini-1.5-flash',      // Most stable and recommended
-                'gemini-1.5-flash-8b',   // Fast and efficient
-                'gemini-2.0-flash-exp'   // Current user setting (may have rate limits)
-            ];
+                selectedGeminiModel,
+                'gemini-3.1-flash-preview',
+                'gemini-2.5-flash-lite',
+                'gemini-1.5-flash'
+            ].filter((v, i, a) => a.indexOf(v) === i); // Deduplicate
 
             let workingModels = [];
             let failedModels = [];
@@ -1029,6 +1268,7 @@ class UserSettings {
             }
             await chrome.storage.sync.set(settings);
             if (this._applyAiMode) this._applyAiMode('custom');
+            this.updateActiveProviderUI('kimi');
             this.showAlert('Kimi settings saved — Kimi is now your active provider.', 'success');
         } catch (error) {
             this.showAlert('Error saving Kimi settings', 'error');
@@ -1093,6 +1333,7 @@ class UserSettings {
 
             await chrome.storage.sync.set(settings);
             if (this._applyAiMode) this._applyAiMode('custom');
+            this.updateActiveProviderUI('nvidia');
             this.showAlert('NVIDIA settings saved — NVIDIA is now your active provider.', 'success');
         } catch (error) {
             this.showAlert('Error saving NVIDIA settings', 'error');
@@ -1154,6 +1395,7 @@ class UserSettings {
             }
             await chrome.storage.sync.set(settings);
             if (this._applyAiMode) this._applyAiMode('custom');
+            this.updateActiveProviderUI('deepseek');
             this.showAlert('DeepSeek settings saved — DeepSeek is now your active provider.', 'success');
         } catch (error) {
             this.showAlert('Error saving DeepSeek settings', 'error');
@@ -1192,9 +1434,13 @@ class UserSettings {
 
     async saveLocalSettings() {
         try {
+            const model = document.getElementById('localModel').value;
             const settings = {
                 customEndpoint: document.getElementById('customEndpoint').value.trim(),
-                localModel: document.getElementById('localModel').value
+                localModel: model,
+                apiProvider: 'local',
+                selectedModel: model,
+                aiMode: 'custom'
             };
 
             if (!settings.customEndpoint) {
@@ -1203,7 +1449,9 @@ class UserSettings {
             }
 
             await chrome.storage.sync.set(settings);
-            this.showAlert('Local AI settings saved successfully', 'success');
+            if (this._applyAiMode) this._applyAiMode('custom');
+            this.updateActiveProviderUI('local');
+            this.showAlert('Local AI settings saved — Local AI is now your active provider.', 'success');
             console.log('✅ Local AI settings saved');
         } catch (error) {
             this.showAlert('Error saving Local AI settings', 'error');
@@ -1311,17 +1559,194 @@ class UserSettings {
     }
 
     async saveAsrSettings() {
+        // Auto-saved on change — the explicit "Save ASR" button was removed
+        // because this is now the single place the engine is configured.
         try {
             const engine = document.getElementById('ltAsrEngine').value;
             const settings = {
                 ltAsrEngine: engine
             };
             await chrome.storage.sync.set(settings);
-            this.showAlert(`ASR Speech Engine settings saved successfully. Active engine: ${engine}`, 'success');
-            console.log('✅ ASR Speech Engine saved:', engine);
+            this.showAlert(`ASR engine saved.`, 'success');
+            this.syncAsrEngineOptions();
+            this.refreshTaskMap();
+            console.log('✅ ASR Settings saved:', settings);
         } catch (error) {
             this.showAlert('Error saving ASR Settings', 'error');
             console.error('❌ Error saving ASR Settings:', error);
+        }
+    }
+
+    /**
+     * Show only the picked engine's settings, and say plainly whether the key
+     * that engine needs is actually present. The engine dropdown and the key
+     * that makes it work now live on different tabs, so this line is what stops
+     * "I picked OpenAI Whisper" from silently meaning "captions will not start".
+     */
+    async syncAsrEngineOptions() {
+        const engineEl = document.getElementById('ltAsrEngine');
+        if (!engineEl) return;
+        const engine = engineEl.value || 'groq';
+
+        const blocks = {
+            groq: 'asrOptionsGroq',
+            whisper: 'asrOptionsWhisper',
+            webSpeech: 'asrOptionsWebSpeech'
+        };
+        Object.entries(blocks).forEach(([name, id]) => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = (name === engine) ? 'block' : 'none';
+        });
+
+        // Read the live input first so the state updates as the user types in
+        // the vault, and only fall back to what is actually stored.
+        const stored = await chrome.storage.sync.get(['groqApiKey', 'openaiApiKey']);
+        const keyValue = (inputId, storedValue) => {
+            const input = document.getElementById(inputId);
+            const raw = input ? input.value : storedValue;
+            return (raw || storedValue || '').trim();
+        };
+
+        const paint = (smallId, hasKey, providerName) => {
+            const el = document.getElementById(smallId);
+            if (!el) return;
+            el.textContent = hasKey
+                ? `${providerName} key found — captions are ready to start.`
+                : `No ${providerName} key saved. Add it under API Keys, or switch to Web Speech API (free).`;
+            el.style.color = hasKey ? 'var(--text-dim)' : 'var(--warning)';
+        };
+
+        paint('asrGroqKeyState', !!keyValue('groqApiKey', stored.groqApiKey), 'Groq');
+        paint('asrOpenaiKeyState', !!keyValue('openaiApiKey', stored.openaiApiKey), 'OpenAI');
+    }
+
+    /**
+     * Same contract as syncAsrEngineOptions, for the Video TLDR section: show
+     * only the picked provider's model box, and state plainly whether the key
+     * that provider needs actually exists — the key lives on another tab.
+     */
+    async syncTldrOptions() {
+        const providerEl = document.getElementById('tldrProvider');
+        if (!providerEl) return;
+        const provider = providerEl.value === 'openai' ? 'openai' : 'groq';
+
+        const groqBlock = document.getElementById('tldrOptionsGroq');
+        const openaiBlock = document.getElementById('tldrOptionsOpenai');
+        if (groqBlock) groqBlock.style.display = provider === 'groq' ? 'block' : 'none';
+        if (openaiBlock) openaiBlock.style.display = provider === 'openai' ? 'block' : 'none';
+
+        const stored = await chrome.storage.sync.get(['groqApiKey', 'openaiApiKey']);
+        const keyValue = (inputId, storedValue) => {
+            const input = document.getElementById(inputId);
+            const raw = input ? input.value : storedValue;
+            return (raw || storedValue || '').trim();
+        };
+
+        const paint = (smallId, hasKey, providerName) => {
+            const el = document.getElementById(smallId);
+            if (!el) return;
+            el.textContent = hasKey
+                ? `${providerName} key found — TLDR is ready to use.`
+                : `No ${providerName} key saved. Add it under API Keys, or switch the TLDR provider.`;
+            el.style.color = hasKey ? 'var(--text-dim)' : 'var(--warning)';
+        };
+
+        paint('tldrGroqKeyState', !!keyValue('groqApiKey', stored.groqApiKey), 'Groq');
+        paint('tldrOpenaiKeyState', !!keyValue('openaiApiKey', stored.openaiApiKey), 'OpenAI');
+    }
+
+    /**
+     * The audit panel on the API Keys tab. It reports the resolved choice — the
+     * provider a job will really call and whether its key exists — rather than
+     * the setting the user last touched.
+     */
+    async renderKeyAudit() {
+        const list = document.getElementById('keyAuditList');
+        if (!list) return;
+
+        const PROVIDER_LABEL = {
+            openai: 'OpenAI', claude: 'Claude', gemini: 'Gemini', kimi: 'Kimi',
+            deepseek: 'DeepSeek', nvidia: 'NVIDIA NIM', local: 'Local AI Server'
+        };
+        const KEY_FOR = {
+            openai: 'openaiApiKey', claude: 'claudeApiKey', gemini: 'geminiApiKey',
+            kimi: 'kimiApiKey', deepseek: 'deepseekApiKey', nvidia: 'nvidiaApiKey',
+            local: 'customEndpoint'
+        };
+
+        try {
+            const s = await chrome.storage.sync.get([
+                'aiMode', 'apiProvider', 'ltAsrEngine', 'writeProvider', 'translateProvider',
+                'tldrProvider', 'openaiApiKey', 'claudeApiKey', 'geminiApiKey', 'kimiApiKey',
+                'deepseekApiKey', 'nvidiaApiKey', 'groqApiKey', 'customEndpoint'
+            ]);
+            const local = await chrome.storage.local.get(['ltEngine']);
+
+            const has = (storageKey) => {
+                const input = document.getElementById(storageKey);
+                const raw = input && input.value ? input.value : s[storageKey];
+                return !!(raw || '').trim();
+            };
+
+            const isFree = (s.aiMode || 'system') !== 'custom';
+            const mainProvider = s.apiProvider || 'openai';
+
+            const rows = [];
+            const providerRow = (job, routed) => {
+                if (isFree) {
+                    return { job, detail: 'AutoMind free tier · key included · 50 uses per day', state: 'free', label: 'free' };
+                }
+                const p = routed || mainProvider;
+                const keyId = KEY_FOR[p];
+                const ok = has(keyId);
+                const what = p === 'local' ? 'endpoint' : 'key';
+                return {
+                    job,
+                    detail: `${PROVIDER_LABEL[p] || p} · reads ${keyId}`,
+                    state: ok ? 'ok' : 'warn',
+                    label: ok ? `${what} saved` : `${what} missing`
+                };
+            };
+
+            rows.push(providerRow('Reply writing', s.writeProvider));
+
+            const ltEngine = local.ltEngine || 'google';
+            if (ltEngine === 'google') {
+                rows.push({ job: 'Subtitle translation', detail: 'Google Translate · no key, no quota', state: 'free', label: 'free' });
+            } else {
+                rows.push(providerRow('Subtitle translation', s.translateProvider));
+            }
+
+            const asr = s.ltAsrEngine || 'groq';
+            if (asr === 'webSpeech') {
+                rows.push({ job: 'Live captions (ASR)', detail: 'Chrome Web Speech · microphone, no key', state: 'free', label: 'free' });
+            } else if (asr === 'groq') {
+                const ok = has('groqApiKey');
+                rows.push({ job: 'Live captions (ASR)', detail: 'Groq Whisper · reads groqApiKey', state: ok ? 'ok' : 'warn', label: ok ? 'key saved' : 'key missing' });
+            } else {
+                const ok = has('openaiApiKey');
+                rows.push({ job: 'Live captions (ASR)', detail: 'OpenAI Whisper · reads openaiApiKey', state: ok ? 'ok' : 'warn', label: ok ? 'key saved' : 'key missing' });
+            }
+
+            // Video TLDR always runs on the user's own key, even on the free tier.
+            if ((s.tldrProvider || 'groq') === 'groq') {
+                const ok = has('groqApiKey');
+                rows.push({ job: 'Video TLDR → post', detail: 'Groq · reads groqApiKey', state: ok ? 'ok' : 'warn', label: ok ? 'key saved' : 'key missing' });
+            } else {
+                const ok = has('openaiApiKey');
+                rows.push({ job: 'Video TLDR → post', detail: 'OpenAI · reads openaiApiKey', state: ok ? 'ok' : 'warn', label: ok ? 'key saved' : 'key missing' });
+            }
+
+            list.innerHTML = rows.map(r => `
+                <div class="audit-row">
+                  <span class="audit-job">${r.job}</span>
+                  <span class="audit-detail">${r.detail}</span>
+                  <span class="audit-state ${r.state}">${r.label}</span>
+                </div>
+            `).join('');
+        } catch (e) {
+            console.warn('⚠️ Could not render key audit:', e);
+            list.innerHTML = '<div class="audit-row"><span class="audit-detail">Could not read settings.</span></div>';
         }
     }
 
@@ -1341,7 +1766,9 @@ class UserSettings {
                 kimiModel: document.getElementById('kimiModel').value,
                 deepseekModel: document.getElementById('deepseekModel').value,
                 nvidiaModel: document.getElementById('nvidiaModel').value,
+                geminiModel: document.getElementById('geminiModel').value,
                 groqModel: document.getElementById('groqModel').value,
+                openaiWhisperModel: document.getElementById('openaiWhisperModel').value,
                 localModel: document.getElementById('localModel').value
             };
 
@@ -1397,26 +1824,36 @@ class UserSettings {
 
     // Reset to Defaults
     async resetToDefaults() {
-        if (confirm('Reset all user settings to defaults?')) {
-            try {
-                const defaultSettings = {
+        if (!confirm('Reset tones, reply length and language to defaults?\n\nYour API keys will NOT be touched.')) return;
+        try {
+            const DEFAULT_TONES = ['professional', 'casual', 'witty', 'analytical', 'contrarian'];
+
+            await chrome.storage.sync.set({
+                userSettings: {
                     defaultTone: 'professional',
+                    selectedTones: DEFAULT_TONES,
                     preferredLanguage: 'auto'
-                };
+                },
+                userLanguageSettings: { preferredLanguage: 'auto' },
+                commentLength: 'medium',
+                language: 'auto',
+                dailyQuota: 50,
+                lastUpdated: new Date().toISOString()
+            });
 
-                await chrome.storage.sync.set({
-                    userSettings: defaultSettings,
-                    userLanguageSettings: { preferredLanguage: 'auto' },
-                    lastUpdated: new Date().toISOString()
-                });
+            // Re-tick the grid immediately rather than waiting on a reload
+            document.querySelectorAll('.tone-checkbox input[type="checkbox"]').forEach(cb => {
+                cb.disabled = false;
+                cb.checked = DEFAULT_TONES.includes(cb.value);
+            });
+            this.updateToneSelection();
 
-                this.loadSettings();
-                this.showAlert('Settings reset to defaults', 'success');
-                console.log('✅ Settings reset to defaults');
-            } catch (error) {
-                this.showAlert('Error resetting settings', 'error');
-                console.error('❌ Error resetting settings:', error);
-            }
+            await this.loadSettings();
+            this.showAlert('Reply settings reset to defaults. API keys kept.', 'success');
+            console.log('✅ Settings reset to defaults');
+        } catch (error) {
+            this.showAlert('Error resetting settings', 'error');
+            console.error('❌ Error resetting settings:', error);
         }
     }
 
@@ -1514,6 +1951,9 @@ class UserSettings {
                         console.log('✅ Selected model set to:', result.selectedModel);
                     }
                 }
+
+                // Sync active provider state to our new unified list layout
+                this.updateActiveProviderUI(result.apiProvider);
             }
 
             // Load character settings
@@ -1566,7 +2006,7 @@ class UserSettings {
             }
 
             // Load individual model selections
-            const modelSettings = await chrome.storage.sync.get(['openaiModel', 'claudeModel', 'kimiModel', 'deepseekModel', 'nvidiaModel', 'groqModel', 'localModel']);
+            const modelSettings = await chrome.storage.sync.get(['openaiModel', 'claudeModel', 'geminiModel', 'kimiModel', 'deepseekModel', 'nvidiaModel', 'groqModel', 'localModel']);
             console.log('📦 Individual model settings loaded:', modelSettings);
 
             if (modelSettings.openaiModel) {
@@ -1576,6 +2016,10 @@ class UserSettings {
             if (modelSettings.claudeModel) {
                 const element = document.getElementById('claudeModel');
                 if (element) element.value = modelSettings.claudeModel;
+            }
+            if (modelSettings.geminiModel) {
+                const element = document.getElementById('geminiModel');
+                if (element) element.value = modelSettings.geminiModel;
             }
             if (modelSettings.kimiModel) {
                 const element = document.getElementById('kimiModel');
@@ -1634,11 +2078,107 @@ class UserSettings {
             }
 
             // Load ASR Engine settings
-            const asrSettings = await chrome.storage.sync.get(['ltAsrEngine']);
+            const asrSettings = await chrome.storage.sync.get(['ltAsrEngine', 'openaiWhisperModel']);
             const element = document.getElementById('ltAsrEngine');
             if (element) {
                 element.value = asrSettings.ltAsrEngine || 'groq';
+                // Auto-save on change — this is the single place the engine is configured
+                if (!element._autoSaveBound) {
+                    element._autoSaveBound = true;
+                    element.addEventListener('change', () => this.saveAsrSettings());
+                }
             }
+
+            // OpenAI's transcription model is its own setting: whisper-1 is the
+            // cheap default, the gpt-4o-*-transcribe models cost more per minute.
+            const whisperModelEl = document.getElementById('openaiWhisperModel');
+            if (whisperModelEl) {
+                whisperModelEl.value = asrSettings.openaiWhisperModel || 'whisper-1';
+                if (!whisperModelEl._autoSaveBound) {
+                    whisperModelEl._autoSaveBound = true;
+                    whisperModelEl.addEventListener('change', async () => {
+                        await chrome.storage.sync.set({ openaiWhisperModel: whisperModelEl.value });
+                        this.showAlert('OpenAI transcription model saved.', 'success');
+                    });
+                }
+            }
+
+            // The Groq model sits next to the engine picker but is saved by the
+            // Groq save action, so keep it auto-saving on its own too.
+            const groqModelEl = document.getElementById('groqModel');
+            if (groqModelEl && !groqModelEl._autoSaveBound) {
+                groqModelEl._autoSaveBound = true;
+                groqModelEl.addEventListener('change', async () => {
+                    await chrome.storage.sync.set({ groqModel: groqModelEl.value });
+                    this.showAlert('Groq Whisper model saved.', 'success');
+                });
+            }
+
+            // Load subtitle translation engine (shared with the side panel via storage.local)
+            const ltLocal = await chrome.storage.local.get(['ltEngine']);
+            const ltEngineEl = document.getElementById('ltEngine');
+            if (ltEngineEl) ltEngineEl.value = ltLocal.ltEngine || 'google';
+
+            // Load Task Routing settings (per-task provider/model overrides)
+            const routing = await chrome.storage.sync.get(['writeProvider', 'writeModel', 'translateProvider', 'translateModel']);
+            ['writeProvider', 'writeModel', 'translateProvider', 'translateModel'].forEach(key => {
+                const el = document.getElementById(key);
+                if (!el) return;
+                el.value = routing[key] || '';
+                if (!el._autoSaveBound) {
+                    el._autoSaveBound = true;
+                    el.addEventListener('change', async () => {
+                        await chrome.storage.sync.set({ [key]: el.value.trim() });
+                        this.showAlert('Task routing saved.', 'success');
+                        this.refreshTaskMap();
+                    });
+                }
+            });
+
+            // Load Video TLDR settings — everything auto-saves on change, like
+            // task routing above.
+            const tldr = await chrome.storage.sync.get(['tldrProvider', 'tldrGroqModel', 'tldrOpenaiModel', 'tldrLanguage']);
+            const TLDR_DEFAULTS = {
+                tldrProvider: 'groq',
+                tldrGroqModel: 'llama-3.3-70b-versatile',
+                tldrOpenaiModel: 'gpt-4o-mini',
+                tldrLanguage: 'auto'
+            };
+            Object.entries(TLDR_DEFAULTS).forEach(([key, fallback]) => {
+                const el = document.getElementById(key);
+                if (!el) return;
+                el.value = tldr[key] || fallback;
+                if (!el._autoSaveBound) {
+                    el._autoSaveBound = true;
+                    el.addEventListener('change', async () => {
+                        await chrome.storage.sync.set({ [key]: el.value });
+                        this.showAlert('Video TLDR settings saved.', 'success');
+                        this.syncTldrOptions();
+                        this.refreshTaskMap();
+                    });
+                }
+            });
+
+            // Reflect which providers have a stored key, and keep the dots live
+            // as the user types so the row header confirms input immediately.
+            this.refreshKeyDots();
+            document.querySelectorAll('.key-dot[data-key-for]').forEach(dot => {
+                const input = document.getElementById(dot.getAttribute('data-key-for'));
+                if (input && !input._dotBound) {
+                    input._dotBound = true;
+                    input.addEventListener('input', () => {
+                        this.refreshKeyDots();
+                        this.syncAsrEngineOptions();
+                        this.syncTldrOptions();
+                        this.renderKeyAudit();
+                    });
+                }
+            });
+
+            await this.refreshTaskMap();
+            await this.syncAsrEngineOptions();
+            await this.syncTldrOptions();
+            await this.renderKeyAudit();
 
             console.log('✅ All settings loaded successfully');
         } catch (error) {

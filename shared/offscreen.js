@@ -6,12 +6,42 @@ let audioStream = null;
 let audioCtx = null;
 let intervalId = null;
 let webSpeechRec = null;
+let chunkSeq = 0;
+let maxRmsInSegment = 0;
+let sumRmsInSegment = 0;
+let rmsCount = 0;
+
+let currentRecorderStartTime = 0;
+let silenceFrameCount = 0;
+
+async function sendMessageWithRetry(message, retries = 5, delay = 500) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(message, (res) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(res);
+          }
+        });
+      });
+    } catch (err) {
+      console.warn(`🎙️ [Offscreen] sendMessage failed (attempt ${i + 1}/${retries}):`, err.message);
+      if (i === retries - 1) throw err;
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.target !== 'offscreen') return;
 
   if (message.action === 'ping') {
-    if (sendResponse) sendResponse({ alive: true });
+    // `capturing` matters as much as `alive`: the panels pre-create this document
+    // on load purely to shave startup latency, so its mere existence proves
+    // nothing about whether audio is actually being recorded.
+    if (sendResponse) sendResponse({ alive: true, capturing: !!audioStream });
     return true; // Keep message channel open to preserve offscreen lifetime in MV3
   } else if (message.action === 'start_capture') {
     startCapture(message.streamId, message.config);
@@ -29,8 +59,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// How loud the stream's own audio stays. Muting used to be hard-wired to "TTS
+// is on", which left no way to follow along with the original speaker.
+const TTS_ORIGINAL_AUDIO_GAIN = { mute: 0.0, low: 0.15, keep: 1.0 };
+
+function resolvePlaybackGain(isMuted, isTtsEnabled, originalAudioMode) {
+  if (isMuted) return 0.0;                    // explicit Mute tab always wins
+  if (!isTtsEnabled) return 1.0;
+  const gain = TTS_ORIGINAL_AUDIO_GAIN[originalAudioMode];
+  return gain === undefined ? 0.0 : gain;     // default stays the old behaviour
+}
+
 async function startCapture(streamId, config) {
   stopCapture(); // Ensure previous capture is fully cleaned up
+  chunkSeq = 0;
 
   console.log('🎙️ [Offscreen] Beginning parallel setup with streamId:', streamId);
 
@@ -56,10 +98,22 @@ async function startCapture(streamId, config) {
     [stream, context] = await Promise.all([streamPromise, audioCtxPromise]);
   } catch (err) {
     console.error('❌ [Offscreen] Parallel setup failed:', err);
-    chrome.runtime.sendMessage({
+    sendMessageWithRetry({
       action: 'lt_error',
       error: 'Capture failed: ' + err.message
-    });
+    }).catch(() => {});
+    return;
+  }
+
+  // A stream with no audio track would record silence forever. Fail loudly.
+  if (stream.getAudioTracks().length === 0) {
+    console.error('❌ [Offscreen] Stream has no audio track.');
+    stream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
+    try { context.close(); } catch (_) {}
+    sendMessageWithRetry({
+      action: 'lt_error',
+      error: 'The captured tab produced no audio track.'
+    }).catch(() => {});
     return;
   }
 
@@ -72,12 +126,25 @@ async function startCapture(streamId, config) {
     audioCtx.resume().catch(e => console.warn('🎙️ [Offscreen] AudioContext resume warning:', e));
   }
 
+  // Create a silent oscillator loop connected to destination to prevent Chrome from throttling or suspending the offscreen page
+  try {
+    const silentOsc = audioCtx.createOscillator();
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.setValueAtTime(0, audioCtx.currentTime); // 0 volume = completely silent
+    silentOsc.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
+    silentOsc.start();
+    console.log("🎙️ [Offscreen] Silent oscillator keep-alive started to prevent background throttling.");
+  } catch (err) {
+    console.warn("🎙️ [Offscreen] Failed to start silent oscillator:", err);
+  }
+
   // Register onended listener on tracks to handle tab navigation, close, or reload
   stream.getAudioTracks().forEach(track => {
     track.onended = () => {
       console.warn('🎙️ [Offscreen] Audio track ended (tab navigated, reloaded, or closed).');
       stopCapture();
-      chrome.runtime.sendMessage({ action: 'lt_tab_stop' }).catch(() => {});
+      sendMessageWithRetry({ action: 'lt_tab_stop' }).catch(() => {});
     };
   });
 
@@ -88,7 +155,19 @@ async function startCapture(streamId, config) {
   // of whether the user mutes playback or TTS is enabled.
   const captureGain = audioCtx.createGain();
   captureGain.gain.value = 1.0;
-  source.connect(captureGain);
+
+  // Add Dynamics Compressor to automatically normalize volume levels (AGC)
+  // This boosts quiet speech and prevents clipping, making Whisper inputs loud and clear.
+  const compressor = audioCtx.createDynamicsCompressor();
+  compressor.threshold.setValueAtTime(-24, audioCtx.currentTime);
+  compressor.knee.setValueAtTime(30, audioCtx.currentTime);
+  compressor.ratio.setValueAtTime(12, audioCtx.currentTime);
+  compressor.attack.setValueAtTime(0.003, audioCtx.currentTime);
+  compressor.release.setValueAtTime(0.25, audioCtx.currentTime);
+
+  source.connect(compressor);
+  compressor.connect(captureGain);
+
   const captureDestination = audioCtx.createMediaStreamDestination();
   captureGain.connect(captureDestination);
 
@@ -100,46 +179,33 @@ async function startCapture(streamId, config) {
   playbackGain.connect(audioCtx.destination);
   window._playbackGainNode = playbackGain;
 
-  // Set initial playback volume based on config passed from background script
+  // Set initial playback volume based on config passed from background script.
+  // A tabCapture stream takes the tab's audio away from the speakers, so we owe
+  // the user a re-play here.
   const isTtsEnabled = !!config.ltTtsEnabled;
   const isMuted = !!config.ltMuteTab;
-  playbackGain.gain.value = (isTtsEnabled || isMuted) ? 0.0 : 1.0;
-  console.log(`🎙️ [Offscreen] Initial playback gain: ${playbackGain.gain.value} (TTS:${isTtsEnabled} Muted:${isMuted})`);
+  playbackGain.gain.value = resolvePlaybackGain(isMuted, isTtsEnabled, config.ltTtsOriginalAudio);
+  console.log(`🎙️ [Offscreen] Initial playback gain: ${playbackGain.gain.value} (TTS:${isTtsEnabled} Muted:${isMuted} Original:${config.ltTtsOriginalAudio || 'mute'})`);
 
   // ─── VAD: AnalyserNode on CAPTURE path ───────────────────────────────
   // Highly sensitive VAD settings to prevent missing quiet or short speech segments.
-  const VAD_THRESHOLD = 0.012; // Highly sensitive threshold
-  const VAD_MIN_FRAMES = 1;    // Frame threshold to prevent clip start consonant sounds
+  const VAD_THRESHOLD = 0.016; // Increased to prevent capturing background hum/music/noise
+  // 3 frames on the 75ms poll grid = 225ms of speech (the old comment's "300ms"
+  // was wrong — 4 frames is 225ms of *gaps*, 300ms wall-clock at best). Each poll
+  // reads an instantaneous ~10.7ms window, so an unvoiced consonant landing on a
+  // probe used to reset the run and lose the whole segment.
+  const VAD_MIN_FRAMES = 3;
 
   const analyser = audioCtx.createAnalyser();
   analyser.fftSize = 512;
   const vadBuffer = new Float32Array(analyser.fftSize);
-  source.connect(analyser);
+  // Tap the CAPTURE path (post-compressor) so VAD measures the exact signal
+  // Whisper receives. Tapping the raw source under-reports quiet streams that
+  // the compressor's makeup gain makes perfectly audible, causing false skips.
+  captureGain.connect(analyser);
 
   let hasSoundInSegment = false;
   let soundFrameCount = 0;
-
-  // Poll volume every 75ms — optimal CPU-performance compromise
-  const vadInterval = setInterval(() => {
-    if (!audioStream) return;
-    analyser.getFloatTimeDomainData(vadBuffer);
-    let sum = 0;
-    for (let i = 0; i < vadBuffer.length; i++) {
-      sum += vadBuffer[i] * vadBuffer[i];
-    }
-    const rms = Math.sqrt(sum / vadBuffer.length);
-
-    if (rms > VAD_THRESHOLD) {
-      soundFrameCount++;
-      if (soundFrameCount >= VAD_MIN_FRAMES) {
-        hasSoundInSegment = true; // Only flag real speech after sustained signal
-      }
-    } else {
-      soundFrameCount = 0; // Reset counter on silence
-    }
-  }, 75);
-
-  window._vadInterval = vadInterval;
 
   // ─── Dual alternating MediaRecorders for valid WebM chunk containers ───
   let recorderA = null;
@@ -162,97 +228,163 @@ async function startCapture(streamId, config) {
       soundFrameCount = 0;
       const blob = event.data;
 
-      console.log(`🎙️ [Offscreen] Recorder ${index} WebM blob emitted. Size: ${blob.size} bytes. VAD sound: ${hasSound}`);
+      const avgRms = rmsCount > 0 ? sumRmsInSegment / rmsCount : 0;
+      const maxRms = maxRmsInSegment;
+
+      // Reset volume metrics for the next segment
+      maxRmsInSegment = 0;
+      sumRmsInSegment = 0;
+      rmsCount = 0;
+
+      console.log(`🎙️ [Offscreen] Recorder ${index} WebM blob emitted. Size: ${blob.size} bytes. VAD sound: ${hasSound} | Max RMS: ${maxRms.toFixed(5)} | Avg RMS: ${avgRms.toFixed(5)}`);
 
       if (blob.size < 1000) {
         console.warn(`🎙️ [Offscreen] Skipping extremely small audio segment (${blob.size} bytes).`);
         return;
       }
 
-      await processAudioBlob(blob, config, hasSound);
+      await processAudioBlob(blob, config, hasSound, maxRms, avgRms);
     }
   };
 
   recorderA.ondataavailable = (event) => handleRecorderData(event, 0);
   recorderB.ondataavailable = (event) => handleRecorderData(event, 1);
 
-  const sliceInterval = typeof config.segmentDuration === 'number' ? config.segmentDuration : 2500;
-  console.log(`🎙️ [Offscreen] Setting Ping-Pong recording interval to ${sliceInterval}ms`);
+  const swapRecorders = () => {
+    const nextIndex = 1 - currentRecorderIndex;
+    console.log(`🎙️ [Offscreen] Swapping recorders: ${currentRecorderIndex} -> ${nextIndex} (Elapsed: ${Date.now() - currentRecorderStartTime}ms)`);
+
+    try {
+      // 1. Verify and start/resume the next recorder first to maintain continuous gapless capture
+      if (recorders[nextIndex]) {
+        const state = recorders[nextIndex].state;
+        if (state === 'inactive') {
+          recorders[nextIndex].start();
+        } else if (state === 'paused') {
+          recorders[nextIndex].resume();
+        }
+      } else {
+        console.error('🎙️ [Offscreen] Recorder destroyed, stopping capture.');
+        stopCapture();
+        sendMessageWithRetry({ action: 'lt_tab_stop' }).catch(() => {});
+        return;
+      }
+      
+      // 2. Stop the current recorder to trigger ondataavailable and generate a valid WebM chunk
+      const currentRec = recorders[currentRecorderIndex];
+      currentRecorderIndex = nextIndex;
+      currentRecorderStartTime = Date.now();
+      silenceFrameCount = 0; // Reset silence counter on swap
+      
+      if (currentRec) {
+        if (currentRec.state === 'recording') {
+          currentRec.stop();
+        } else if (currentRec.state === 'paused') {
+          currentRec.resume();
+          setTimeout(() => {
+            try { currentRec.stop(); } catch (_) {}
+          }, 50);
+        }
+      }
+    } catch (err) {
+      console.error('🎙️ [Offscreen] Error swapping MediaRecorders:', err);
+    }
+  };
+
+  // Poll volume every 75ms — optimal CPU-performance compromise
+  const vadInterval = setInterval(() => {
+    if (!audioStream) return;
+    analyser.getFloatTimeDomainData(vadBuffer);
+    let sum = 0;
+    for (let i = 0; i < vadBuffer.length; i++) {
+      sum += vadBuffer[i] * vadBuffer[i];
+    }
+    const rms = Math.sqrt(sum / vadBuffer.length);
+
+    if (rms > maxRmsInSegment) {
+      maxRmsInSegment = rms;
+    }
+    sumRmsInSegment += rms;
+    rmsCount++;
+
+    if (rms > VAD_THRESHOLD) {
+      soundFrameCount++;
+      silenceFrameCount = 0; // Reset silence frames when there is sound
+      if (soundFrameCount >= VAD_MIN_FRAMES) {
+        hasSoundInSegment = true; // Only flag real speech after sustained signal
+      }
+    } else {
+      // Leaky integrator, not a hard reset. Speech is not continuously above
+      // threshold — stop consonants and unvoiced fricatives dip below it
+      // mid-word — so zeroing the counter on a single quiet probe meant a short
+      // utterance ("No.", "Đúng rồi.") never reached VAD_MIN_FRAMES and the whole
+      // segment was discarded without ever being sent for transcription.
+      soundFrameCount = Math.max(0, soundFrameCount - 1);
+      silenceFrameCount++; // Increment silence frames
+    }
+
+    // Check for VAD-based dynamic chunk swap
+    const elapsed = Date.now() - currentRecorderStartTime;
+    const minDuration = (chunkSeq === 0) ? 800 : 1200; // First chunk swaps fast to show text quickly
+
+    // Swap on silence (~225ms / 3 frames) after min duration, or at a hard maximum of 4.5s.
+    // Tuned on a 151-WPM narration (Arc "Core Primitives"): fast speakers almost
+    // never pause 375ms mid-flow, so the old 5-frame rule meant every segment hit
+    // the hard cap and cut MID-WORD (~60 blind cuts in a 3.6-min video). 225ms
+    // still clears inter-sentence gaps in fast speech, so most swaps now land on
+    // real boundaries; the higher cap halves the remaining blind cuts and gives
+    // Whisper more context per call. Latency stays fine — ASR cost per call is
+    // dominated by network, not audio length.
+    const shouldSwap = (elapsed >= minDuration && silenceFrameCount >= 3) || (elapsed >= 4500);
+    if (shouldSwap) {
+      swapRecorders();
+    }
+  }, 75);
+
+  window._vadInterval = vadInterval;
 
   try {
     // Start the first recorder
     if (recorders[0] && recorders[0].state === 'inactive') {
+      currentRecorderStartTime = Date.now();
+      silenceFrameCount = 0;
       recorders[0].start();
       console.log(`🎙️ [Offscreen] Recorder 0 started.`);
       // Broadcast ready signal to background script immediately
-      chrome.runtime.sendMessage({ action: 'lt_capture_ready' }).catch(() => {});
+      sendMessageWithRetry({ action: 'lt_capture_ready' }).catch(() => {});
     }
-
-    // Set up the swapping interval
-    activeIntervalId = setInterval(() => {
-      const nextIndex = 1 - currentRecorderIndex;
-      console.log(`🎙️ [Offscreen] Swapping recorders: ${currentRecorderIndex} -> ${nextIndex}`);
-
-      try {
-        // 1. Verify and start/resume the next recorder first to maintain continuous gapless capture
-        if (recorders[nextIndex]) {
-          const state = recorders[nextIndex].state;
-          if (state === 'inactive') {
-            recorders[nextIndex].start();
-          } else if (state === 'paused') {
-            recorders[nextIndex].resume();
-          }
-        } else {
-          console.error('🎙️ [Offscreen] Recorder destroyed, stopping interval.');
-          clearInterval(activeIntervalId);
-          activeIntervalId = null;
-          chrome.runtime.sendMessage({ action: 'lt_tab_stop' }).catch(() => {});
-          return;
-        }
-        
-        // 2. Stop the current recorder to trigger ondataavailable and generate a valid WebM chunk
-        const currentRec = recorders[currentRecorderIndex];
-        currentRecorderIndex = nextIndex;
-        
-        if (currentRec) {
-          if (currentRec.state === 'recording') {
-            currentRec.stop();
-          } else if (currentRec.state === 'paused') {
-            currentRec.resume();
-            setTimeout(() => {
-              try { currentRec.stop(); } catch (_) {}
-            }, 50);
-          }
-        }
-      } catch (err) {
-        console.error('🎙️ [Offscreen] Error swapping MediaRecorders:', err);
-      }
-    }, sliceInterval);
   } catch (err) {
     console.error('🎙️ [Offscreen] Error starting first MediaRecorder:', err);
     stopCapture();
   }
 }
 
-async function processAudioBlob(blob, config, hasSound) {
-  // Direct tab audio capturing has zero microphone ambient/room noise.
-  // We bypass VAD entirely for tab capture.
-  console.log(`🎙️ [Offscreen] Segment confirmed — sending segment to background.`);
+async function processAudioBlob(blob, config, hasSound, maxRms, avgRms) {
+  const currentSeq = chunkSeq++;
+  console.log(`🎙️ [Offscreen] Segment ${currentSeq} confirmed — sending to background.`);
 
   const reader = new FileReader();
   reader.onloadend = () => {
     const base64Data = reader.result.split(',')[1];
-    chrome.runtime.sendMessage({
+    sendMessageWithRetry({
       action: 'lt_process_audio',
       audioBase64: base64Data,
-      config: config
-    });
+      config: config,
+      seq: currentSeq,
+      hasSound: hasSound,
+      maxRms: maxRms,
+      avgRms: avgRms
+    }).catch((e) => console.error('🎙️ [Offscreen] Failed to send process_audio:', e));
   };
   reader.readAsDataURL(blob);
 }
 
 function stopCapture() {
   console.log('🎙️ [Offscreen] Stopping tab capture...');
+
+  try {
+    stopTtsAudio();
+  } catch (_) {}
 
   window._playbackGainNode = null;
 

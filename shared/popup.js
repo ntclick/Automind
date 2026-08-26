@@ -4,15 +4,47 @@
 const STATE_KEY = 'translateState';
 const MAX_CHARS = 2000;
 
+// ─── Shared output-language memory ────────────────────────────────────────
+// The Live tab (ltTgtLang, ISO codes like 'vi') and the Translate tab
+// (tgtLang, full names like 'Vietnamese') used to keep completely separate,
+// un-synced language memory — picking Vietnamese in one never carried over
+// to the other. This map lets the two features share one remembered choice.
+const LANG_CODE_TO_NAME = {
+  en: 'English', vi: 'Vietnamese', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
+  fr: 'French', es: 'Spanish', de: 'German', ru: 'Russian', th: 'Thai', ar: 'Arabic'
+};
+const LANG_NAME_TO_CODE = Object.fromEntries(
+  Object.entries(LANG_CODE_TO_NAME).map(([code, name]) => [name, code])
+);
+
 // Caption history storage
 let captionHistory = []; // Array of { time: string, original: string, translated: string }
 let captionHistoryVisible = false;
+let isHistoryLoaded = false;       // guard: true after loadCaptionHistoryFromStorage resolves
+let pendingSubtitleMessages = [];  // queue for lt_subtitle messages that arrive before history is loaded
+let lastSubtitleSeq = -1;
 
 // Track current active tab ID synchronously to preserve user gesture context
 let currentActiveTabId = null;
 window.currentCapturedMicTabId = null;
 
+// Settings cache to preserve user gesture in synchronous callbacks
+let cachedSyncSettings = {};
+async function updateSettingsCache() {
+  try {
+    cachedSyncSettings = await chrome.storage.sync.get(['ltAsrEngine', 'openaiApiKey', 'groqApiKey', 'apiKey']);
+  } catch (e) {
+    console.warn('Failed to update sync settings cache:', e);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  updateSettingsCache();
+  chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace === 'sync') {
+      updateSettingsCache();
+    }
+  });
   // Mark body when running in detached window so .popout-btn hides
   if (new URLSearchParams(location.search).get('detached') === '1') {
     document.body.classList.add('detached');
@@ -24,37 +56,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setupTabs();
 
-  // Initialize active tab ID synchronously on load using lastFocusedWindow to avoid popup window empty tabs issue
-  chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
+  // Initialize active tab ID synchronously on load using currentWindow to avoid popup window empty tabs issue
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
     if (tab) {
       currentActiveTabId = tab.id;
       console.log('🎙️ [Popup] Initialized active tab ID:', currentActiveTabId);
     }
   });
 
-  // Keep track of active tab ID on tab switches to maintain synchronous user gesture reference
-  chrome.tabs.onActivated.addListener((activeInfo) => {
-    currentActiveTabId = activeInfo.tabId;
-    console.log('🎙️ [Popup] Active tab changed (activated):', currentActiveTabId);
-  });
-
-  // Keep track of active tab on window focus changes
-  chrome.windows.onFocusChanged.addListener((windowId) => {
-    if (windowId === chrome.windows.WINDOW_ID_NONE) return;
-    chrome.tabs.query({ active: true, windowId: windowId }, ([tab]) => {
-      if (tab) {
-        currentActiveTabId = tab.id;
-        console.log('🎙️ [Popup] Active tab changed (window focus):', currentActiveTabId);
-      }
-    });
-  });
-
-  // Keep track of active tab on tab reloads/updates
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (tab.active) {
-      currentActiveTabId = tabId;
-    }
-  });
+  // Pre-create offscreen document to speed up capture startup!
+  sendMessage({ action: 'lt_ensure_offscreen' }).catch(() => {});
 
 
   bindListeners();
@@ -67,28 +78,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Load saved caption history
   loadCaptionHistoryFromStorage();
 
-  // Check if we were redirected from Side Panel to auto-start capture
-  if (document.body.classList.contains('in-popup')) {
-    chrome.storage.local.get(['autoStartCapture'], (res) => {
-      if (res && res.autoStartCapture) {
-        // Consume immediately to avoid stale state issues on manual opens!
-        chrome.storage.local.remove(['autoStartCapture']);
-        
-        // Switch to live panel tab first
-        const liveTab = document.querySelector('.tab[data-tab="live"]');
-        if (liveTab) liveTab.click();
-        
-        // Synchronously check and target the correct active tab prior to overlay render
-        chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
-          if (tab) {
-            currentActiveTabId = tab.id;
-            console.log('🎙️ [Popup] Synced active tab ID for secure gesture overlay:', currentActiveTabId);
-          }
-          showSecureGestureOverlay();
-        });
-      }
-    });
-  }
+  // Legacy hand-off flag from the old "reopen the popup to grant permission"
+  // flow. That flow never actually granted activeTab, so it is gone — clear any
+  // leftover value so an upgraded install doesn't act on it.
+  chrome.storage.local.remove(['autoStartCapture']);
 
   // Keep settings in sync between Side Panel, Popup, and Options page
   chrome.storage.onChanged.addListener((changes) => {
@@ -101,15 +94,40 @@ document.addEventListener('DOMContentLoaded', () => {
         if (asrEngineElement && asrEngineElement.value !== newVal) {
           asrEngineElement.value = newVal;
         }
+        refreshAsrControls();
         if (typeof switchLtMode === 'function') {
           switchLtMode('tabCapture');
         }
+      } else if (key === 'openaiApiKey' || key === 'groqApiKey' || key === 'apiKey') {
+        // Keys are edited on the Options page now, so a panel left open would
+        // otherwise keep refusing to start with a key the user just saved.
+        cachedSyncSettings[key] = newVal;
       } else if (key === 'isCapturing') {
         if (typeof setLiveStatus === 'function') {
           setLiveStatus(!!newVal);
         }
       } else if (key === 'activeTabId') {
         if (newVal) window.currentCapturedTabId = newVal;
+      } else if (key === 'ltTtsChromeVoiceMap') {
+        // Re-sync voice dropdown when map changes from another panel
+        if (typeof updateVoiceGroupVisibility === 'function') updateVoiceGroupVisibility();
+      } else if (key === 'ltTgsVoice') {
+        // legacy key, ignore
+      } else if (key === 'apiProvider' || key === 'aiMode' || key === 'ltEngine' || key === 'ltTgtLang') {
+        const el = document.getElementById(key);
+        if (el && el.value !== newVal) {
+          el.value = newVal;
+        }
+        if (key === 'ltTgtLang') {
+          // Keep the Translate tab's remembered language in sync when it changes
+          // in another open window (popup vs side panel).
+          const name = LANG_CODE_TO_NAME[newVal];
+          const tgtEl = document.getElementById('tgtLang');
+          if (name && tgtEl && tgtEl.value !== name) tgtEl.value = name;
+        }
+        if (typeof updateVoiceGroupVisibility === 'function') {
+          updateVoiceGroupVisibility();
+        }
       } else {
         const el = document.getElementById(key);
         if (el) {
@@ -140,6 +158,10 @@ function setupTabs() {
       document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
       tab.classList.add('active');
       document.getElementById(`${target}-panel`).classList.add('active');
+      if (target === 'tldr') {
+        renderTldrSessionSelect();
+        updateTldrCaptureUI();
+      }
     });
   });
 }
@@ -200,11 +222,21 @@ function bindListeners() {
   const persist = () => { saveTranslationState(); updateCharCount(); };
   document.getElementById('translateInput').addEventListener('input', persist);
   document.getElementById('srcLang').addEventListener('change', saveTranslationState);
-  document.getElementById('tgtLang').addEventListener('change', saveTranslationState);
+  document.getElementById('tgtLang').addEventListener('change', async () => {
+    await saveTranslationState();
+    // Remember this choice for the Live tab too, when the language is one both share.
+    const name = document.getElementById('tgtLang').value;
+    const code = LANG_NAME_TO_CODE[name];
+    if (code) {
+      await chrome.storage.local.set({ ltTgtLang: code });
+      const ltTgtEl = document.getElementById('ltTgtLang');
+      if (ltTgtEl && ltTgtEl.value !== code) ltTgtEl.value = code;
+    }
+  });
 
   // Live translation bindings
-  document.getElementById('ltModeMic').addEventListener('click', () => switchLtMode('microphone'));
-  document.getElementById('ltModeTab').addEventListener('click', () => switchLtMode('tabCapture'));
+  // (ltModeMic / ltModeTab buttons were removed from the panel — mode is
+  // derived from the ASR engine setting, now configured in the Options page.)
   document.getElementById('toggleLiveBtn').addEventListener('click', toggleLiveTranslation);
   document.getElementById('clearLiveCaptions').addEventListener('click', clearLiveCaptions);
   document.getElementById('openSidePanelBtn').addEventListener('click', openSidePanel);
@@ -218,6 +250,23 @@ function bindListeners() {
   document.getElementById('toggleCaptionHistory').addEventListener('click', toggleCaptionHistory);
   document.getElementById('copyAllCaptions').addEventListener('click', copyAllCaptions);
   document.getElementById('exportCaptionsTxt').addEventListener('click', exportCaptionsTxt);
+  const sessionSelect = document.getElementById('historySessionSelect');
+  if (sessionSelect) {
+    sessionSelect.addEventListener('change', renderHistoryPanel);
+  }
+
+  // TLDR tab: "Read video" reuses the exact Live Captions capture pipeline —
+  // one capture state, whichever tab started it.
+  const tldrAutoReadBtn = document.getElementById('tldrAutoReadBtn');
+  if (tldrAutoReadBtn) tldrAutoReadBtn.addEventListener('click', autoReadTldr);
+  const tldrCaptureBtn = document.getElementById('tldrCaptureBtn');
+  if (tldrCaptureBtn) tldrCaptureBtn.addEventListener('click', toggleLiveTranslation);
+  const tldrSessionSel = document.getElementById('tldrSessionSelect');
+  if (tldrSessionSel) tldrSessionSel.addEventListener('change', updateTldrSessionInfo);
+  const tldrBtn = document.getElementById('tldrVideoBtn');
+  if (tldrBtn) tldrBtn.addEventListener('click', generateTldrPost);
+  const copyTldrBtn = document.getElementById('copyTldrPost');
+  if (copyTldrBtn) copyTldrBtn.addEventListener('click', copyTldrPost);
 
   document.getElementById('ltTopic').addEventListener('change', async () => {
     await chrome.storage.local.set({ ltTopic: document.getElementById('ltTopic').value });
@@ -228,22 +277,40 @@ function bindListeners() {
   });
 
   document.getElementById('ltTgtLang').addEventListener('change', async () => {
-    await chrome.storage.local.set({ ltTgtLang: document.getElementById('ltTgtLang').value });
+    const lang = document.getElementById('ltTgtLang').value;
+    await chrome.storage.local.set({ ltTgtLang: lang });
+    // Refresh voice panel for the newly selected output language
+    if (typeof updateVoiceGroupVisibility === 'function') {
+      await updateVoiceGroupVisibility();
+    }
+    // Remember this choice for the Translate tab too, when the language is one both share.
+    const name = LANG_CODE_TO_NAME[lang];
+    if (name) {
+      const tgtEl = document.getElementById('tgtLang');
+      if (tgtEl && tgtEl.value !== name) {
+        tgtEl.value = name;
+        await saveTranslationState();
+      }
+    }
   });
 
   document.getElementById('ltEngine').addEventListener('change', async () => {
     await chrome.storage.local.set({ ltEngine: document.getElementById('ltEngine').value });
+    if (typeof updateVoiceGroupVisibility === 'function') {
+      await updateVoiceGroupVisibility();
+    }
   });
 
-  document.getElementById('ltAsrEngine').addEventListener('change', async () => {
-    const val = document.getElementById('ltAsrEngine').value;
-    await chrome.storage.sync.set({ ltAsrEngine: val });
-    switchLtMode('tabCapture');
-  });
-
-  document.getElementById('ltSegmentPreset').addEventListener('change', async () => {
-    await chrome.storage.local.set({ ltSegmentPreset: document.getElementById('ltSegmentPreset').value });
-  });
+  // ASR engine selection moved to the Options page (single source of truth,
+  // next to the API keys it depends on). The storage.onChanged listener above
+  // still picks up changes and switches the capture mode accordingly.
+  const openOptionsFromLive = document.getElementById('openOptionsFromLive');
+  if (openOptionsFromLive) {
+    openOptionsFromLive.addEventListener('click', (e) => {
+      e.preventDefault();
+      chrome.runtime.openOptionsPage();
+    });
+  }
 
   const scrollLockBtn = document.getElementById('toggleScrollLock');
   if (scrollLockBtn) {
@@ -274,15 +341,105 @@ function bindListeners() {
     });
   }
 
+  const ttsOriginalAudioSelect = document.getElementById('ltTtsOriginalAudio');
+  if (ttsOriginalAudioSelect) {
+    ttsOriginalAudioSelect.addEventListener('change', async () => {
+      await chrome.storage.local.set({ ltTtsOriginalAudio: ttsOriginalAudioSelect.value });
+      await applyOriginalAudioVolume();
+    });
+  }
+
+  // On-page overlay style. The content script watches these storage keys, so a
+  // change lands on the running stream without restarting capture.
+  const asrEngineSelect = document.getElementById('ltAsrEngine');
+  if (asrEngineSelect) {
+    asrEngineSelect.addEventListener('change', async () => {
+      await chrome.storage.sync.set({ ltAsrEngine: asrEngineSelect.value });
+      await refreshAsrControls();
+    });
+  }
+
+  const asrModelSelect = document.getElementById('ltAsrModel');
+  if (asrModelSelect) {
+    asrModelSelect.addEventListener('change', async () => {
+      const engine = document.getElementById('ltAsrEngine')?.value || 'groq';
+      const spec = ASR_MODELS[engine];
+      if (spec) await chrome.storage.sync.set({ [spec.key]: asrModelSelect.value });
+    });
+  }
+
+  const subtitleStyleSelect = document.getElementById('ltSubtitleStyle');
+  if (subtitleStyleSelect) {
+    subtitleStyleSelect.addEventListener('change', async () => {
+      await chrome.storage.local.set({ ltSubtitleStyle: subtitleStyleSelect.value });
+    });
+  }
+
+  const subtitleLinesSelect = document.getElementById('ltSubtitleLines');
+  if (subtitleLinesSelect) {
+    subtitleLinesSelect.addEventListener('change', async () => {
+      await chrome.storage.local.set({ ltSubtitleLines: parseInt(subtitleLinesSelect.value, 10) || 3 });
+    });
+  }
+
+  const subtitleTypewriterToggle = document.getElementById('ltSubtitleTypewriter');
+  if (subtitleTypewriterToggle) {
+    subtitleTypewriterToggle.addEventListener('change', async () => {
+      await chrome.storage.local.set({ ltSubtitleTypewriter: subtitleTypewriterToggle.checked });
+    });
+  }
+
   document.getElementById('ltTtsToggle').addEventListener('change', async () => {
     const enabled = document.getElementById('ltTtsToggle').checked;
     await chrome.storage.local.set({ ltTtsEnabled: enabled });
     
     if (!enabled) {
+      // stop() only cuts the utterance Chrome is speaking; the background's own
+      // _ttsQueue survives and its 'interrupted' event just advances to the next
+      // item, so turning narration off used to drain the backlog instead of
+      // ending it. Flush the queue too.
       try { chrome.tts.stop(); } catch (_) {}
+      try { sendMessage({ action: 'lt_stop_tts' }).catch(() => {}); } catch (_) {}
     }
+    // Refresh voice group visibility based on TTS on/off state
+    if (typeof updateVoiceGroupVisibility === 'function') {
+      await updateVoiceGroupVisibility();
+    }
+    await applyOriginalAudioVolume();
   });
 
+  const ttsSpeedSelect = document.getElementById('ltTtsSpeedSelect');
+  if (ttsSpeedSelect) {
+    ttsSpeedSelect.addEventListener('change', async () => {
+      const selectedSpeed = ttsSpeedSelect.value;
+      await chrome.storage.local.set({ ltTtsSpeed: selectedSpeed });
+      console.log(`⚡ [TTS] Speed set to: ${selectedSpeed}`);
+    });
+  }
+
+  const ttsGenderSelect = document.getElementById('ltTtsGenderSelect');
+  if (ttsGenderSelect) {
+    ttsGenderSelect.addEventListener('change', async () => {
+      const selectedGender = ttsGenderSelect.value;
+      await chrome.storage.local.set({ ltTtsGender: selectedGender });
+      console.log(`🗣️ [TTS] Gender set to: ${selectedGender}`);
+    });
+  }
+
+  const chromeVoiceSelect = document.getElementById('ltTtsChromeVoiceSelect');
+  if (chromeVoiceSelect) {
+    chromeVoiceSelect.addEventListener('change', async () => {
+      const selectedVoice = chromeVoiceSelect.value;
+      const lang = document.getElementById('ltTgtLang')?.value || 'vi';
+      // Save per-language chrome voice map
+      const stored = await chrome.storage.local.get(['ltTtsChromeVoiceMap']);
+      const voiceMap = stored.ltTtsChromeVoiceMap || {};
+      voiceMap[lang] = selectedVoice;
+      await chrome.storage.local.set({ ltTtsChromeVoiceMap: voiceMap });
+      await chrome.storage.sync.set({ ltTtsChromeVoiceMap: voiceMap });
+      console.log(`🗣️ [TTS] Chrome Voice for "${lang}" set to: ${selectedVoice}`);
+    });
+  }
 
 }
 
@@ -331,8 +488,12 @@ async function restoreTranslationState() {
       document.getElementById('translateResult').classList.remove('hidden');
     }
   } else {
+    // First run for this feature: inherit the user's Live tab output-language
+    // choice if one is already remembered, instead of always defaulting to
+    // English regardless of what they picked elsewhere in the extension.
+    const { ltTgtLang } = await chrome.storage.local.get('ltTgtLang');
     srcEl.value = 'English';
-    tgtEl.value = 'English';
+    tgtEl.value = LANG_CODE_TO_NAME[ltTgtLang] || 'Vietnamese';
     await saveTranslationState();
   }
   updateCharCount();
@@ -411,7 +572,19 @@ function copyTranslation() {
 function swapLanguages() {
   const src = document.getElementById('srcLang');
   const tgt = document.getElementById('tgtLang');
-  [src.value, tgt.value] = [tgt.value, src.value];
+  
+  let srcVal = src.value;
+  let tgtVal = tgt.value;
+  
+  if (srcVal === 'auto') {
+    srcVal = tgtVal;
+    tgtVal = (tgtVal === 'English') ? 'Vietnamese' : 'English';
+  } else {
+    [srcVal, tgtVal] = [tgtVal, srcVal];
+  }
+  
+  src.value = srcVal;
+  tgt.value = tgtVal;
 
   const inputEl  = document.getElementById('translateInput');
   const outputEl = document.getElementById('translateOutput');
@@ -557,16 +730,16 @@ let scrollLocked = false;
 
 async function syncLiveStatus() {
   try {
-    const result = await chrome.storage.local.get(['ltSourceLang', 'ltTgtLang', 'ltMode', 'ltEngine', 'ltTtsEnabled', 'ltMuteTab', 'ltSegmentPreset', 'ltTopic']);
+    const result = await chrome.storage.local.get(['ltSourceLang', 'ltTgtLang', 'ltMode', 'ltEngine', 'ltTtsEnabled', 'ltTtsSpeed', 'ltTtsGender', 'ltTtsOriginalAudio', 'ltSubtitleLines', 'ltSubtitleTypewriter', 'ltSubtitleStyle', 'ltMuteTab', 'ltTopic']);
     
-    // Set default languages: source = auto-detect, target = Vietnamese
-    const sourceLang = result.ltSourceLang || 'auto';
+    // Set default languages: source = English, target = Vietnamese
+    const sourceLang = result.ltSourceLang || 'en';
     const targetLang = result.ltTgtLang || 'vi';
     
     document.getElementById('ltSourceLang').value = sourceLang;
     document.getElementById('ltTgtLang').value = targetLang;
     
-    if (!result.ltSourceLang) chrome.storage.local.set({ ltSourceLang: 'auto' });
+    if (!result.ltSourceLang) chrome.storage.local.set({ ltSourceLang: 'en' });
     if (!result.ltTgtLang) chrome.storage.local.set({ ltTgtLang: 'vi' });
 
     const activeTopic = result.ltTopic || 'general';
@@ -574,7 +747,7 @@ async function syncLiveStatus() {
     if (!result.ltTopic) chrome.storage.local.set({ ltTopic: 'general' });
 
     if (result.ltEngine) document.getElementById('ltEngine').value = result.ltEngine;
-    if (result.ltSegmentPreset) document.getElementById('ltSegmentPreset').value = result.ltSegmentPreset;
+
 
     // Sync popup-only mode buttons based on ASR Engine
     const syncRes = await chrome.storage.sync.get('ltAsrEngine');
@@ -584,6 +757,7 @@ async function syncLiveStatus() {
     if (asrEngineElement) {
       asrEngineElement.value = asrEngine;
     }
+    await refreshAsrControls();
     
     const activeMode = 'tabCapture';
 
@@ -596,29 +770,72 @@ async function syncLiveStatus() {
       popupModeTab.style.color = 'var(--text)';
       popupModeTab.style.display = 'flex';
     }
-    if (result.ltTtsEnabled !== undefined) document.getElementById('ltTtsToggle').checked = !!result.ltTtsEnabled;
-    if (result.ltMuteTab !== undefined) document.getElementById('ltMuteTabToggle').checked = !!result.ltMuteTab;
+    // Null-guarded: ltMuteTabToggle no longer exists in the markup, and the
+    // unguarded lookup used to throw here and silently skip every sync below it.
+    const ttsToggleEl = document.getElementById('ltTtsToggle');
+    if (ttsToggleEl && result.ltTtsEnabled !== undefined) ttsToggleEl.checked = !!result.ltTtsEnabled;
+    const muteToggleEl = document.getElementById('ltMuteTabToggle');
+    if (muteToggleEl && result.ltMuteTab !== undefined) muteToggleEl.checked = !!result.ltMuteTab;
+
+
+    const ttsOriginalAudioSelect = document.getElementById('ltTtsOriginalAudio');
+    if (ttsOriginalAudioSelect) ttsOriginalAudioSelect.value = result.ltTtsOriginalAudio || 'mute';
+
+    const subtitleStyleSelect = document.getElementById('ltSubtitleStyle');
+    if (subtitleStyleSelect) subtitleStyleSelect.value = result.ltSubtitleStyle || 'netflix';
+    const subtitleLinesSelect = document.getElementById('ltSubtitleLines');
+    if (subtitleLinesSelect) subtitleLinesSelect.value = String(result.ltSubtitleLines || 3);
+    const subtitleTypewriterToggle = document.getElementById('ltSubtitleTypewriter');
+    if (subtitleTypewriterToggle) subtitleTypewriterToggle.checked = result.ltSubtitleTypewriter !== false;
+
+    // Sync TTS speed select
+    const ttsSpeedSelect = document.getElementById('ltTtsSpeedSelect');
+    if (ttsSpeedSelect) {
+      ttsSpeedSelect.value = result.ltTtsSpeed || '1.25';
+    }
+
+    // Sync Chrome TTS gender select
+    const ttsGenderSelect = document.getElementById('ltTtsGenderSelect');
+    if (ttsGenderSelect) {
+      ttsGenderSelect.value = result.ltTtsGender || 'female';
+    }
+
+
+    
+    // Sync per-language TTS voice selection (handled inside updateVoiceGroupVisibility)
+    if (typeof updateVoiceGroupVisibility === 'function') {
+      await updateVoiceGroupVisibility();
+    }
+
     switchLtMode(activeMode);
+
+    // Ensure we get the active tab ID asynchronously to avoid race conditions on startup
+    let activeTabId = currentActiveTabId;
+    if (!activeTabId) {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab) {
+        currentActiveTabId = tab.id;
+        activeTabId = tab.id;
+      }
+    }
 
     const bgStatus = await sendMessage({ action: 'lt_get_status' });
     if (bgStatus && bgStatus.status === 'listening') {
-      switchLtMode(activeMode);
-      setLiveStatus(true);
-      
-      // Update the local captured tab ID so that switching tabs is tracked correctly when reopening the popup!
-      window.currentCapturedTabId = bgStatus.tabId;
-      chrome.tabs.get(bgStatus.tabId, (capturedTab) => {
-        if (capturedTab && capturedTab.url) {
-          window.currentCapturedTabUrl = capturedTab.url;
-        }
-      });
-      
-      // Notify user if the captured tab is different from the currently active tab
-      chrome.tabs.query({ active: true, currentWindow: true }, ([currentTab]) => {
-        if (currentTab && bgStatus.tabId !== currentTab.id) {
-          toast('warning', 'Translating background tab. Click Stop to reset.');
-        }
-      });
+      // Prioritize the focused tab: only set active UI if this tab is the one being captured!
+      if (bgStatus.tabId === activeTabId) {
+        switchLtMode(activeMode);
+        setLiveStatus(true);
+        window.currentCapturedTabId = bgStatus.tabId;
+        chrome.tabs.get(bgStatus.tabId, (capturedTab) => {
+          if (capturedTab && capturedTab.url) {
+            window.currentCapturedTabUrl = capturedTab.url;
+          }
+        });
+      } else {
+        // A different tab is captured. Let this focused tab start capture to take over.
+        setLiveStatus(false);
+        toast('info', 'Another tab is active. Click Start here to capture this tab instead.');
+      }
     } else {
       setLiveStatus(false);
     }
@@ -628,15 +845,26 @@ async function syncLiveStatus() {
 }
 
 function switchLtMode(mode) {
-  ltMode = 'tabCapture';
-  chrome.storage.local.set({ ltMode: 'tabCapture' });
+  ltMode = mode;
+  chrome.storage.local.set({ ltMode: mode });
 
   const micBtn = document.getElementById('ltModeMic');
   const tabBtn = document.getElementById('ltModeTab');
 
-  if (micBtn) micBtn.style.display = 'none';
-  if (tabBtn) {
-    tabBtn.style.cssText = 'flex: 1; border-color: var(--primary); background: var(--primary-soft); color: var(--text); display: flex !important;';
+  if (mode === 'microphone') {
+    if (micBtn) {
+      micBtn.style.cssText = 'flex: 1; border-color: var(--primary); background: var(--primary-soft); color: var(--text); display: flex !important;';
+    }
+    if (tabBtn) {
+      tabBtn.style.display = 'none';
+    }
+  } else {
+    if (micBtn) {
+      micBtn.style.display = 'none';
+    }
+    if (tabBtn) {
+      tabBtn.style.cssText = 'flex: 1; border-color: var(--primary); background: var(--primary-soft); color: var(--text); display: flex !important;';
+    }
   }
 }
 
@@ -644,7 +872,9 @@ async function ensureContentScriptInjected(tabId) {
   try {
     // Check if the content script is already listening
     await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), 500);
       chrome.tabs.sendMessage(tabId, { action: 'ping' }, (response) => {
+        clearTimeout(timer);
         if (chrome.runtime.lastError || !response) {
           reject(new Error('Need injection'));
         } else {
@@ -687,7 +917,14 @@ async function ensureContentScriptInjected(tabId) {
   }
 }
 
-async function toggleLiveTranslation(fromOverlay = false) {
+async function toggleLiveTranslation() {
+  // One physical action = one toggle. A double-click used to stop AND restart:
+  // the first click stops, the button relabels to Start instantly, and the
+  // second click of the pair lands on the new meaning.
+  const now = Date.now();
+  if (now - (window._lastToggleAt || 0) < 600) return;
+  window._lastToggleAt = now;
+
   const sourceLang = document.getElementById('ltSourceLang').value;
   const targetLang = document.getElementById('ltTgtLang').value;
   const btn = document.getElementById('toggleLiveBtn');
@@ -696,34 +933,33 @@ async function toggleLiveTranslation(fromOverlay = false) {
 
   if (!ltListening) {
     // Validate that the user has the required API Key for the selected ASR Speech Engine
-    try {
-      const syncSettings = await chrome.storage.sync.get(['ltAsrEngine', 'openaiApiKey', 'groqApiKey', 'apiKey']);
-      const asrEngine = syncSettings.ltAsrEngine || 'groq';
-      if (asrEngine === 'groq') {
-        if (!syncSettings.groqApiKey || !syncSettings.groqApiKey.trim()) {
-          toast('error', 'Groq API Key is missing. Please add it in settings.');
-          return;
-        }
-      } else if (asrEngine === 'whisper') {
-        const whisperKey = syncSettings.openaiApiKey || syncSettings.apiKey;
-        if (!whisperKey || !whisperKey.trim()) {
-          toast('error', 'OpenAI API Key is missing. Please add it in settings.');
-          return;
-        }
+    const asrEngine = cachedSyncSettings.ltAsrEngine || 'groq';
+    if (asrEngine === 'groq') {
+      if (!cachedSyncSettings.groqApiKey || !cachedSyncSettings.groqApiKey.trim()) {
+        toast('error', 'Groq API Key is missing. Please add it in settings.');
+        return;
       }
-    } catch (e) {
-      console.warn('ASR key validation failed:', e);
+    } else if (asrEngine === 'whisper') {
+      const whisperKey = cachedSyncSettings.openaiApiKey || cachedSyncSettings.apiKey;
+      if (!whisperKey || !whisperKey.trim()) {
+        toast('error', 'OpenAI API Key is missing. Please add it in settings.');
+        return;
+      }
     }
 
     window._captureStartTimestamp = Date.now();
     console.log('🚀 [Latency Benchmark] Start capture initiated at:', window._captureStartTimestamp);
     
-    // Helper to safely restore button UI state on failures
+    // Helper to safely restore button UI state on failures.
+    // Re-query the icon: btnIcon is DETACHED once the spinner swap runs, and
+    // writing outerHTML on a detached node throws — which used to leave the
+    // spinner stuck forever on any failed start.
     const resetBtnState = () => {
       btn.disabled = false;
       btnText.textContent = 'Start Live Captions';
-      if (btnIcon) {
-        btnIcon.outerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+      const icon = btn.querySelector('svg') || btn.querySelector('.spinner');
+      if (icon) {
+        icon.outerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
       }
     };
 
@@ -743,23 +979,24 @@ async function toggleLiveTranslation(fromOverlay = false) {
       try {
         cleanupLocalTabCaptureSilently();
 
-        // Ensure content script injected on the active tab first so subtitles show up as overlay
-        try {
-          await ensureContentScriptInjected(targetTabId);
-        } catch (injectErr) {
-          console.warn('⚠️ [Popup] Content script injection failed or was restricted. Overlay is disabled for this tab:', injectErr);
-        }
+        // Concurrently ensure content script is injected and offscreen is created
+        const injectPromise = (async () => {
+          try {
+            await ensureContentScriptInjected(targetTabId);
+          } catch (injectErr) {
+            console.warn('⚠️ [Popup] Content script injection failed or was restricted. Overlay is disabled for this tab:', injectErr);
+          }
+        })();
 
-        // Ensure offscreen document is created and ready
-        const ensureResponse = await sendMessage({ action: 'lt_ensure_offscreen' });
+        const offscreenPromise = sendMessage({ action: 'lt_ensure_offscreen' });
+
+        const [_, ensureResponse] = await Promise.all([injectPromise, offscreenPromise]);
+
         if (!ensureResponse || !ensureResponse.success) {
           throw new Error(ensureResponse?.error || 'Failed to initialize offscreen environment');
         }
 
         const ltEngine = document.getElementById('ltEngine').value;
-        const preset = document.getElementById('ltSegmentPreset').value;
-        const PRESET_DURATIONS = { speed: 1500, balanced: 2500, accuracy: 3500 };
-        const segmentDuration = PRESET_DURATIONS[preset] || 3500;
 
         // Request background script to capture the tab stream ID and launch Offscreen capture
         const startResponse = await sendMessage({
@@ -768,13 +1005,20 @@ async function toggleLiveTranslation(fromOverlay = false) {
           streamId: streamId, // Pass the streamId if we successfully captured it in the page!
           sourceLang: sourceLang,
           targetLang: targetLang,
-          ltEngine: ltEngine,
-          segmentDuration: segmentDuration
+          ltEngine: ltEngine
         });
+
+        // The background swallowed a start that raced a just-finished stop.
+        // Not an error — just quietly stay stopped.
+        if (startResponse && startResponse.cause === 'stop_cooldown') {
+          console.log('🎙️ [Popup] Start ignored: it raced a just-finished stop.');
+          setLiveStatus(false);
+          return;
+        }
 
         if (startResponse && startResponse.success) {
           window.currentCapturedTabId = targetTabId;
-          
+
           // Get tab URL for status tracking
           chrome.tabs.get(targetTabId, (capturedTab) => {
             if (capturedTab && capturedTab.url) {
@@ -784,38 +1028,17 @@ async function toggleLiveTranslation(fromOverlay = false) {
 
           setLiveStatus(true);
           toast('success', 'Tab audio capture active');
-          
-          // If launched from the action popup, automatically redirect to the Side Panel and close popup
-          if (document.body.classList.contains('in-popup')) {
-            setTimeout(async () => {
-              try {
-                await openSidePanel();
-              } catch (e) {
-                console.warn('Failed to redirect to Side Panel:', e);
-              }
-            }, 200); // Speed up redirect to 200ms
-          }
+          // Captions render right here in the popup. No auto-redirect to the
+          // Side Panel: closing the surface the user just clicked in is jarring,
+          // and the "Open in Chrome Side Panel" button exists for when they
+          // actually want the docked view.
         } else {
           throw new Error(startResponse?.error || 'Failed to start background tab capture');
         }
       } catch (err) {
         console.error('🎙️ [Tab Capture] Failed in executeCapture:', err);
-        
-        // If we are in the Side Panel and capture failed due to invocation / activeTab, redirect to popup!
-        if (document.body.classList.contains('in-sidepanel')) {
-          toast('info', 'Opening secure popup to grant audio capture permission...', 3000);
-          try {
-            chrome.storage.local.set({ autoStartCapture: true });
-            chrome.action.openPopup();
-          } catch (e) {
-            console.warn('chrome.action.openPopup failed:', e);
-            showLiveCaptureError(err, null);
-            toast('error', 'Cannot capture tab audio directly from Sidebar.');
-          }
-        } else {
-          showLiveCaptureError(err, null);
-          toast('error', 'Unable to capture tab audio: ' + err.message);
-        }
+        showLiveCaptureError(err, null);
+        toast('error', 'Unable to capture tab audio: ' + err.message);
         setLiveStatus(false);
       } finally {
         btn.disabled = false;
@@ -826,51 +1049,26 @@ async function toggleLiveTranslation(fromOverlay = false) {
       }
     };
 
-    // Try to obtain streamId directly in page context using user gesture!
+    // chrome.tabCapture needs activeTab for this tab, which clicking the toolbar
+    // icon grants, or a host permission covering the URL. Asking from the popup
+    // is the surface where that grant exists.
+    const failCapture = (reason) => {
+      console.warn('⚠️ tabCapture unavailable:', reason);
+      chrome.tabs.get(targetTabId, (tab) => {
+        showLiveCaptureError(new Error(reason), tab?.url || null);
+        toast('error', 'Unable to capture tab audio.');
+        resetBtnState();
+      });
+    };
+
     try {
       if (typeof chrome.tabCapture !== 'undefined' && chrome.tabCapture.getMediaStreamId) {
         chrome.tabCapture.getMediaStreamId({ targetTabId: targetTabId }, async (streamId) => {
-          if (chrome.runtime.lastError) {
-            console.warn('⚠️ Failed to get streamId directly:', chrome.runtime.lastError.message);
-            
-            // Check if the page URL is restricted (Chrome system page, etc.)
-            chrome.tabs.get(targetTabId, (tab) => {
-              try {
-                const url = tab?.url || '';
-                if (isRestrictedUrl(url)) {
-                  showLiveCaptureError(new Error('Restricted URL'), url);
-                  resetBtnState();
-                  return;
-                }
-
-                // Otherwise it's a gesture/permission issue
-                if (document.body.classList.contains('in-popup')) {
-                  if (fromOverlay) {
-                    showLiveCaptureError(new Error('Tab capture permission or gesture denied. Please ensure you clicked inside the tab page and tab has active audio playing.'), url);
-                    toast('error', 'Capture permission denied.');
-                  } else {
-                    showSecureGestureOverlay();
-                  }
-                  resetBtnState();
-                } else if (document.body.classList.contains('in-sidepanel')) {
-                  toast('info', 'Opening secure popup to grant audio capture permission...', 3000);
-                  try {
-                    chrome.storage.local.set({ autoStartCapture: true });
-                    chrome.action.openPopup();
-                  } catch (e) {
-                    console.warn('chrome.action.openPopup failed:', e);
-                    showLiveCaptureError(new Error('Active tab permission missing'), url);
-                  }
-                  resetBtnState();
-                }
-              } catch (innerErr) {
-                console.error('Error in tab details query fallback:', innerErr);
-                resetBtnState();
-              }
-            });
+          if (chrome.runtime.lastError || !streamId) {
+            failCapture(chrome.runtime.lastError?.message || 'no stream id');
             return;
           }
-          
+
           try {
             await executeCapture(streamId);
           } catch (execErr) {
@@ -879,15 +1077,100 @@ async function toggleLiveTranslation(fromOverlay = false) {
           }
         });
       } else {
-        console.warn('⚠️ chrome.tabCapture is not supported in this context.');
-        await executeCapture(null);
+        failCapture('chrome.tabCapture is not available in this context');
       }
     } catch (outerErr) {
       console.error('Error in direct tabCapture block:', outerErr);
-      resetBtnState();
+      failCapture(outerErr.message);
     }
   } else {
     stopLocalTabCapture();
+  }
+}
+
+// Model choices per speech engine. Both keys live in storage.sync alongside
+// ltAsrEngine, which is what the background caches — so switching here takes
+// effect on the next audio segment without restarting capture.
+const ASR_MODELS = {
+  groq: {
+    key: 'groqModel',
+    fallback: 'whisper-large-v3',
+    options: [
+      ['whisper-large-v3', 'whisper-large-v3 (accurate)'],
+      ['whisper-large-v3-turbo', 'whisper-large-v3-turbo (faster)']
+    ]
+  },
+  whisper: {
+    key: 'openaiWhisperModel',
+    fallback: 'whisper-1',
+    options: [
+      ['whisper-1', 'whisper-1 (cheapest)'],
+      ['gpt-4o-mini-transcribe', 'gpt-4o-mini-transcribe (better)'],
+      ['gpt-4o-transcribe', 'gpt-4o-transcribe (best)']
+    ]
+  },
+  webSpeech: null // Chrome's own recogniser — no model to pick, no key needed
+};
+
+/** Repaint the model list and the missing-key warning for the chosen engine. */
+async function refreshAsrControls() {
+  const engineEl = document.getElementById('ltAsrEngine');
+  if (!engineEl) return;
+
+  const modelEl = document.getElementById('ltAsrModel');
+  const wrap = document.getElementById('ltAsrModelWrap');
+  const warn = document.getElementById('ltAsrKeyWarning');
+
+  const engine = engineEl.value || 'groq';
+  const spec = ASR_MODELS[engine];
+  const stored = await chrome.storage.sync.get([
+    'groqModel', 'openaiWhisperModel', 'groqApiKey', 'openaiApiKey', 'apiKey'
+  ]);
+
+  if (wrap) wrap.style.display = spec ? 'flex' : 'none';
+  if (spec && modelEl) {
+    const current = stored[spec.key] || spec.fallback;
+    modelEl.innerHTML = '';
+    spec.options.forEach(([value, label]) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      modelEl.appendChild(opt);
+    });
+    modelEl.value = spec.options.some(([v]) => v === current) ? current : spec.fallback;
+  }
+
+  if (warn) {
+    let missing = '';
+    if (engine === 'groq' && !(stored.groqApiKey || '').trim()) missing = 'Groq';
+    if (engine === 'whisper' && !((stored.openaiApiKey || stored.apiKey || '').trim())) missing = 'OpenAI';
+    warn.textContent = missing
+      ? `⚠️ No ${missing} API key saved — captions cannot start. Add it in Settings → API Keys.`
+      : '';
+    warn.style.display = missing ? 'block' : 'none';
+  }
+}
+
+// Mirrors resolvePlaybackGain() in offscreen.js. Kept in sync so flipping TTS
+// or its "Original audio" choice takes effect on the running capture instead of
+// waiting for the next one.
+const TTS_ORIGINAL_AUDIO_GAIN = { mute: 0.0, low: 0.15, keep: 1.0 };
+
+async function applyOriginalAudioVolume() {
+  try {
+    const s = await chrome.storage.local.get(['ltMuteTab', 'ltTtsEnabled', 'ltTtsOriginalAudio', 'isCapturing']);
+    if (!s.isCapturing) return;
+
+    let volume = 1.0;
+    if (s.ltMuteTab) {
+      volume = 0.0;
+    } else if (s.ltTtsEnabled) {
+      const gain = TTS_ORIGINAL_AUDIO_GAIN[s.ltTtsOriginalAudio];
+      volume = gain === undefined ? 0.0 : gain;
+    }
+    await sendMessage({ action: 'lt_playback_volume', volume: volume });
+  } catch (err) {
+    console.warn('⚠️ [TTS] Could not apply original audio volume:', err);
   }
 }
 
@@ -949,6 +1232,7 @@ function cleanupLocalTabCaptureSilently() {
 
 function setLiveStatus(active) {
   ltListening = active;
+  updateTldrCaptureUI();
   const btn = document.getElementById('toggleLiveBtn');
   const btnText = document.getElementById('toggleLiveBtnText');
   const indicator = document.getElementById('liveStatusIndicator');
@@ -1040,7 +1324,19 @@ chrome.runtime.onMessage.addListener((message) => {
     if (!ltListening) {
       setLiveStatus(true);
     }
-    appendSubtitleMarkup(message.original, message.translated, message.isUpdate, message.segmentId);
+    if (message.sequenceNumber !== undefined) {
+      if (message.sequenceNumber < lastSubtitleSeq) {
+        console.log(`🎙️ [Popup] Drop out-of-order/stale subtitle segment (seq: ${message.sequenceNumber} < last: ${lastSubtitleSeq})`);
+        return;
+      }
+      lastSubtitleSeq = message.sequenceNumber;
+    }
+    // Queue the message if history hasn't been loaded yet to prevent race condition
+    if (!isHistoryLoaded) {
+      pendingSubtitleMessages.push(message);
+    } else {
+      appendSubtitleMarkup(message.original, message.translated, message.isUpdate, message.segmentId);
+    }
   } else if (message.action === 'lt_processing') {
     if (!ltListening) {
       setLiveStatus(true);
@@ -1055,6 +1351,7 @@ chrome.runtime.onMessage.addListener((message) => {
       setLiveStatus(true);
     } else if (message.status === 'stopped') {
       window._captureStartTimestamp = null;
+      lastSubtitleSeq = -1;
       // ─── CRITICAL FIX: Do NOT call stopLocalTabCapture() here! ─────────
       // Background already stopped the capture and broadcast this message.
       // Calling stopLocalTabCapture() would send lt_tab_stop BACK to
@@ -1129,12 +1426,123 @@ function showPopupProcessingIndicator() {
   }
 }
 
+function isRepetitiveLoop(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "").replace(/\s+/g, " ").trim();
+  const words = clean.split(' ');
+  const n = words.length;
+  if (n < 4) return false;
+
+  // 1. Check for single word repetition (Whisper stutter/loop)
+  const wordCounts = {};
+  for (const w of words) {
+    if (w.length < 3) continue;
+    wordCounts[w] = (wordCounts[w] || 0) + 1;
+  }
+  for (const [w, count] of Object.entries(wordCounts)) {
+    if (w.length >= 5 && count >= 3) {
+      return true;
+    }
+    if (count >= 4) {
+      return true;
+    }
+  }
+
+  // 2. Check for phrase repetition (from 2 to 8 words)
+  for (let len = 2; len <= 8; len++) {
+    const phraseCounts = {};
+    for (let i = 0; i <= n - len; i++) {
+      const phrase = words.slice(i, i + len).join(' ');
+      phraseCounts[phrase] = (phraseCounts[phrase] || 0) + 1;
+    }
+    for (const [phrase, count] of Object.entries(phraseCounts)) {
+      if (count >= 3) {
+        return true;
+      }
+      if (count >= 2 && len >= 3) {
+        const coverage = (len * count) / n;
+        if (coverage > 0.5) {
+          return true;
+        }
+      }
+    }
+  }
+
+  // 3. Substring loop check (for languages like Korean/Japanese without word spaces or with grammar particles)
+  const subCounts = {};
+  for (const w of words) {
+    for (let len = 4; len <= 5; len++) {
+      for (let i = 0; i <= w.length - len; i++) {
+        const sub = w.substring(i, i + len);
+        if (subCounts[sub] !== undefined) continue;
+        
+        let count = 0;
+        let pos = 0;
+        while ((pos = clean.indexOf(sub, pos)) !== -1) {
+          count++;
+          pos += 1;
+        }
+        subCounts[sub] = count;
+      }
+    }
+  }
+  for (const [sub, count] of Object.entries(subCounts)) {
+    if (count >= 3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function isWhisperHallucination(text) {
   if (!text || typeof text !== 'string') return true;
+  if (isRepetitiveLoop(text)) return true;
   
   const lowerText = text.trim().toLowerCase();
   
-  // 1. Direct substring checks - if it contains these, it's almost certainly a hallucination
+  // 1. Strict substring checks - block the entire segment if these appear ANYWHERE
+  const strictBlockedSubstrings = [
+    "transcriber's manual",
+    "transcribers manual",
+    "translation purposes only",
+    "subtitles by",
+    "opensubtitles",
+    "subscene",
+    "amara.org",
+    "amara org",
+    "otter.ai",
+    "otter ai",
+    "castingwords",
+    "casting words",
+    "transcription by eso",
+    "translation by eso",
+    "hướng dẫn sử dụng của người phiên",
+    "transcription provided by",
+    "transcription outsourcing",
+    "complete disclaimer",
+    "tuyên bố từ chối trách nhiệm",
+    "sites.google.com",
+    "phiên âm được cung cấp bởi",
+    "renaissancere",
+    "transcription sponsored by",
+    "phiên âm được tài trợ bởi",
+    "please transcribe the audio",
+    "transcribe the audio accurately",
+    "vui lòng phiên âm âm thanh",
+    "phiên âm âm thanh chính xác",
+    "specialized terms:",
+    "tech/blockchain/crypto livestream",
+    "general transcription",
+    "recent clean transcript context"
+  ];
+  for (const strictSub of strictBlockedSubstrings) {
+    if (lowerText.includes(strictSub)) {
+      return true;
+    }
+  }
+
+  // 2. Conversational substring checks - only block if they represent the standalone content of the segment
   const blockedSubstrings = [
     'i hope you enjoyed this video',
     'hope you enjoyed this video',
@@ -1155,23 +1563,86 @@ function isWhisperHallucination(text) {
     'cảm ơn bạn đã xem',
     'hy vọng bạn thích video này',
     'đăng ký kênh',
-    'chúc các bạn một ngày'
+    'chúc các bạn một ngày',
+    // Additional Vietnamese translations of common Whisper outros
+    'cảm ơn quý vị đã theo dõi',
+    'cảm ơn các bạn đã theo dõi',
+    'cảm ơn bạn đã theo dõi',
+    'cám ơn quý vị đã theo dõi',
+    'cám ơn các bạn đã theo dõi',
+    'cám ơn bạn đã theo dõi',
+    'cám ơn các bạn đã xem',
+    'cám ơn bạn đã xem',
+    'cám ơn đã xem',
+    'cám ơn đã theo dõi',
+    'cảm ơn đã theo dõi',
+    'hãy đăng ký kênh',
+    'đăng ký kênh của tôi',
+    'đăng ký kênh để',
+    'chúc các bạn một ngày tốt lành',
+    'chúc các bạn ngày mới',
+    'chúc bạn ngày mới',
+    'chúc quý vị một ngày tốt lành',
+    'chúc một ngày tốt lành',
+    'cảm ơn bạn đã xem video',
+    'cảm ơn các bạn đã xem video',
+    'cám ơn các bạn đã xem video',
+    'cám ơn bạn đã xem video',
+    'cảm ơn đã xem video',
+    'cám ơn đã xem video',
+    'nhớ đăng ký kênh',
+    'hãy nhấn đăng ký',
+    'nhấn đăng ký kênh',
+    'hãy subscribe',
+    'subtitles by amara org',
+    'otter ai',
+    'see you next time',
+    'see you in the next video',
+    'see you soon',
+    'thank you very much',
+    'thanks very much',
+    'thank you so much',
+    'thanks so much',
+    'have a great day',
+    'have a good day',
+    'don\'t forget to subscribe',
+    'like and subscribe',
+    'castingwords',
+    'casting words',
+    'transcription by eso',
+    'translation by eso',
+    'kakaotalk',
+    '明镜与点点',
+    '请不吝点赞',
+    '订阅 转发',
+    '자막 제공',
+    '플러스친구'
   ];
   
   for (const sub of blockedSubstrings) {
-    if (lowerText.includes(sub)) return true;
+    if (lowerText.includes(sub)) {
+      const withoutSub = lowerText.replace(sub, '').trim();
+      const isStandalone = withoutSub.length < 10; // Less than 10 chars remaining = just the phrase
+      if (isStandalone) return true;
+    }
   }
   
   // 2. Normalize and check exact patterns
   // Clean all punctuation, symbols, brackets, and quotes (including smart quotes)
+  // Note: We do NOT remove digits/numbers (\d) here, as digit-only chunks (e.g. stock prices, years, IDs, SSNs)
+  // are meaningful spoken content, not Whisper hallucinations.
   const clean = lowerText
-    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"]/g, ' ')
+    .replace(/[\s\p{P}\p{S}]/gu, ' ') // replaces punctuation, symbols, and spaces with space
     .replace(/\s+/g, ' ')
     .trim();
     
-  if (clean.length <= 1) return true;
+  if (clean.length <= 1) {
+    if (!/\d/.test(clean)) {
+      return true;
+    }
+  }
   
-  const cleanPatterns = [
+  let cleanPatterns = [
     'thank you for watching',
     'thanks for watching',
     'i hope you enjoyed this video',
@@ -1201,16 +1672,88 @@ function isWhisperHallucination(text) {
     'cảm ơn đã xem',
     'cảm ơn bạn đã xem',
     'hy vọng bạn thích video này',
-    'đăng ký kênh'
+    'đăng ký kênh',
+    // Vietnamese translation fillers/hallucinations
+    'cảm ơn',
+    'cám ơn',
+    'cảm ơn bạn',
+    'cám ơn bạn',
+    'cảm ơn các bạn',
+    'cám ơn các bạn',
+    'tạm biệt',
+    'hẹn gặp lại',
+    'hẹn gặp lại các bạn',
+    'hẹn gặp lại quý vị',
+    'chào tạm biệt',
+    'chào các bạn',
+    'chào mọi người',
+    'xin chào',
+    'tiếng anh',
+    'tiếng việt',
+    'tiếng trung',
+    'tiếng nhật',
+    'tiếng hàn',
+    'english',
+    'vietnamese',
+    'chinese',
+    'japanese',
+    'korean',
+    'thanks you',
+    'thank u',
+    'thank you all',
+    'thank you guys',
+    // NOTE: real single-word speech ('you', 'okay', 'yes', 'no', 'go', company
+    // names like 'google'/'microsoft'/'zoom') was removed from this list — an
+    // AMA guest answering "Yes." was being silently dropped. Only true
+    // hallucination artifacts (fillers + transcription-service credits) remain,
+    // keeping this display filter in sync with the background gate.
+    'oh',
+    'um',
+    'uh',
+    'ah',
+    'video',
+    'subtitles',
+    'caption',
+    'captions',
+    'transcription',
+    'transcribe',
+    'translation',
+    'translate',
+    'amara',
+    'otter'
   ];
+
+  // Anything reaching the panel already cleared the background filter, and the
+  // mic path is the user speaking directly — so short pleasantries are real here.
+  {
+    const conversationalTerms = new Set([
+      'thank you very much', 'thanks very much', 'thank you', 'thanks', 'goodbye', 'bye',
+      'see you next time', 'see you soon', 'thank you so much', 'cảm ơn', 'cám ơn', 'cảm ơn bạn',
+      'cám ơn bạn', 'cảm ơn các bạn', 'cám ơn các bạn', 'tạm biệt', 'hẹn gặp lại', 'hẹn gặp lại các bạn',
+      'hẹn gặp lại quý vị', 'chào tạm biệt', 'chào các bạn', 'chào mọi người', 'xin chào',
+      'thanks you', 'thank u', 'thank you all', 'thank you guys', 'oh', 'um', 'uh', 'ah',
+      'tiếng anh', 'tiếng việt', 'tiếng trung', 'tiếng nhật', 'tiếng hàn',
+      'english', 'vietnamese', 'chinese', 'japanese', 'korean', 'you', 'okay', 'ok', 'yeah', 'yes', 'no', 'go'
+    ]);
+    cleanPatterns = cleanPatterns.filter(p => !conversationalTerms.has(p));
+  }
   
   if (cleanPatterns.includes(clean)) return true;
   
-  // Filter repetitions of short filler words during silent stream gaps
-  const fillers = new Set(['you', 'yeah', 'ok', 'okay', 'yes', 'no', 'ah', 'oh', 'um', 'uh', 'so', 'and', 'but', 'the', 'video']);
+  // Filter repetitions of short filler words during silent stream gaps (both English and Vietnamese)
+  const fillers = new Set([
+    'ah', 'oh', 'um', 'uh', 'so', 'and', 'but', 'the', 'video',
+    'ơi', 'thì', 'là', 'mà', 'nhỉ', 'nhé', 'nha', 'vậy', 'đó', 'này', 'kia', 'thế', 'ô', 'ơ', 'ư', 'á', 'à',
+    'you', 'me', 'i', 'we', 'he', 'she', 'it', 'they', 'them', 'him', 'her', 'his', 'its', 'us', 'our', 'your', 'my', 'their',
+    'go', 'do', 'bye', 'hello', 'hi', 'thank', 'thanks', 'yeah', 'yep', 'nah', 'uh-huh', 'um-hum',
+    'tôi', 'bạn', 'anh', 'chị', 'em', 'nó', 'họ', 'chúng', 'ta', 'đây', 'ấy', 'nào', 'ai', 'gì', 'dạ', 'vâng', 'ừ'
+  ]);
   const words = clean.split(' ');
   const onlyFillers = words.every(w => fillers.has(w));
-  if (onlyFillers && words.length < 5) return true;
+  if (onlyFillers) {
+    const maxFillerLength = 2;
+    if (words.length < maxFillerLength) return true;
+  }
   
   return false;
 }
@@ -1239,55 +1782,80 @@ function appendSubtitleMarkup(original, translated, isUpdate, segmentId) {
   const timeStr = now.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
   // Check if we should update the last block in-place
-  if (isUpdate) {
-    // Try to find the exact block by segmentId first to avoid out-of-order race conditions!
-    const targetDiv = segmentId ? document.getElementById('sub-' + segmentId) : null;
-    const lastDiv = targetDiv || container.lastElementChild;
+  const targetDiv = segmentId ? document.getElementById('sub-' + segmentId) : null;
+  const lastDiv = targetDiv || (isUpdate ? container.lastElementChild : null);
+  
+  if (lastDiv && lastDiv.children.length === 2) {
+    const translationText = lastDiv.children[0];
+    const originalText = lastDiv.children[1];
     
-    // Verify it is a valid subtitle block (has two children)
-    if (lastDiv && lastDiv.children.length === 2) {
-      const translationText = lastDiv.children[0];
-      const originalText = lastDiv.children[1];
-      
-      if (translated === 'Translating...') {
-        translationText.style.color = 'var(--text-dim)';
-        translationText.style.fontStyle = 'italic';
-        translationText.textContent = '⚡ Translating...';
-        originalText.textContent = original;
-      } else if (typeof translated === 'string' && translated.startsWith('🎙️')) {
-        translationText.style.color = 'var(--text-dim)';
-        translationText.style.fontStyle = 'italic';
-        translationText.textContent = translated;
-        originalText.textContent = original;
-      } else {
-        translationText.style.color = '#ffd043';
-        translationText.style.fontStyle = 'normal';
-        translationText.textContent = translated;
-        originalText.textContent = original;
-      }
-
-      // Update last history entry in-place
-      if (captionHistory.length > 0 && translated !== 'Translating...') {
-        captionHistory[captionHistory.length - 1].original = original;
-        captionHistory[captionHistory.length - 1].translated = translated;
-        if (captionHistoryVisible) renderHistoryPanel();
-        saveCaptionHistoryToStorage();
-      }
-      
-      if (!scrollLocked) container.scrollTop = container.scrollHeight;
-      return;
+    if (translated === 'Translating...') {
+      translationText.style.color = 'var(--text-dim)';
+      translationText.style.fontStyle = 'italic';
+      translationText.textContent = '⚡ Translating...';
+      originalText.textContent = original;
+    } else if (typeof translated === 'string' && translated.startsWith('🎙️')) {
+      translationText.style.color = 'var(--text-dim)';
+      translationText.style.fontStyle = 'italic';
+      translationText.textContent = translated;
+      originalText.textContent = original;
+    } else {
+      translationText.style.color = '#ffd043';
+      translationText.style.fontStyle = 'normal';
+      translationText.textContent = translated;
+      originalText.textContent = original;
     }
+
+    // Update history entry in-place, or push new if not found
+    if (translated !== 'Translating...' && !(typeof translated === 'string' && translated.startsWith('🎙️'))) {
+      let histIndex = -1;
+      if (segmentId) {
+        histIndex = captionHistory.findIndex(h => h.segmentId === segmentId);
+      }
+      if (histIndex !== -1) {
+        // Update existing entry
+        captionHistory[histIndex].original = original;
+        captionHistory[histIndex].translated = translated;
+      } else {
+        // No entry found (e.g. history empty or segmentId missing) — push new
+        captionHistory.push({ segmentId: segmentId, time: timeStr, original: original, translated: translated });
+      }
+      updateHistoryBadge();
+      if (captionHistoryVisible) renderHistoryPanel();
+      saveCaptionHistoryToStorage();
+    }
+    
+    if (!scrollLocked) container.scrollTop = container.scrollHeight;
+    return;
   }
 
   // Push to history (only finalized captions, not "Translating...")
   if (translated !== 'Translating...') {
-    captionHistory.push({ time: timeStr, original: original, translated: translated });
+    let histIndex = -1;
+    if (segmentId) {
+      histIndex = captionHistory.findIndex(h => h.segmentId === segmentId);
+    }
+    if (histIndex !== -1) {
+      captionHistory[histIndex].original = original;
+      captionHistory[histIndex].translated = translated;
+    } else {
+      captionHistory.push({ segmentId: segmentId, time: timeStr, original: original, translated: translated });
+    }
     updateHistoryBadge();
     if (captionHistoryVisible) renderHistoryPanel();
     saveCaptionHistoryToStorage();
   } else {
     // Still push a placeholder so in-place updates work
-    captionHistory.push({ time: timeStr, original: original, translated: '' });
+    let histIndex = -1;
+    if (segmentId) {
+      histIndex = captionHistory.findIndex(h => h.segmentId === segmentId);
+    }
+    if (histIndex !== -1) {
+      captionHistory[histIndex].original = original;
+      captionHistory[histIndex].translated = '';
+    } else {
+      captionHistory.push({ segmentId: segmentId, time: timeStr, original: original, translated: '' });
+    }
     saveCaptionHistoryToStorage();
   }
 
@@ -1332,14 +1900,56 @@ function appendSubtitleMarkup(original, translated, isUpdate, segmentId) {
   if (!scrollLocked) container.scrollTop = container.scrollHeight;
 }
 
-function clearLiveCaptions() {
-  const container = document.getElementById('liveSubtitleContainer');
-  container.innerHTML = '<span style="color: var(--text-dim); font-style: italic; display: block; text-align: center; margin-top: 10px;">Captions will appear here in real-time...</span>';
-  captionHistory = [];
-  updateHistoryBadge();
-  if (captionHistoryVisible) renderHistoryPanel();
-  chrome.storage.local.remove('captionHistory').catch(() => {});
-  sendMessage({ action: 'lt_clear_session' }).catch(() => {});
+async function getSessionCaptions(sessionId) {
+  if (sessionId === 'current') {
+    return captionHistory || [];
+  }
+  try {
+    const res = await chrome.storage.local.get(['ltSessionHistory']);
+    const sessions = res.ltSessionHistory || [];
+    const found = sessions.find(s => s.id === sessionId);
+    return found ? (found.captions || []) : [];
+  } catch (err) {
+    console.warn('[Popup] Failed to get session captions:', err);
+    return [];
+  }
+}
+
+async function getSelectedSessionCaptions() {
+  const select = document.getElementById('historySessionSelect');
+  return getSessionCaptions(select ? select.value : 'current');
+}
+
+async function clearLiveCaptions() {
+  const select = document.getElementById('historySessionSelect');
+  const selectedSession = select ? select.value : 'current';
+  
+  if (selectedSession === 'current') {
+    const container = document.getElementById('liveSubtitleContainer');
+    if (container) {
+      container.innerHTML = '<span style="color: var(--text-dim); font-style: italic; display: block; text-align: center; margin-top: 10px;">Captions will appear here in real-time...</span>';
+    }
+    captionHistory = [];
+    updateHistoryBadge();
+    if (captionHistoryVisible) await renderHistoryPanel();
+    chrome.storage.local.remove('captionHistory').catch(() => {});
+    sendMessage({ action: 'lt_clear_session' }).catch(() => {});
+    toast('success', 'Active session captions cleared.');
+  } else {
+    try {
+      const res = await chrome.storage.local.get(['ltSessionHistory']);
+      let sessions = res.ltSessionHistory || [];
+      sessions = sessions.filter(s => s.id !== selectedSession);
+      await chrome.storage.local.set({ ltSessionHistory: sessions });
+      
+      if (select) select.value = 'current';
+      if (captionHistoryVisible) await renderHistoryPanel();
+      toast('success', 'Past session deleted.');
+    } catch (err) {
+      console.warn('[Popup] Failed to delete past session:', err);
+      toast('error', 'Failed to delete past session.');
+    }
+  }
 }
 
 // ─── Caption History Functions ──────────────────────────────────────────────
@@ -1361,12 +1971,52 @@ function toggleCaptionHistory() {
   }
 }
 
-function renderHistoryPanel() {
+async function renderHistoryPanel() {
   const list = document.getElementById('captionHistoryList');
   const countEl = document.getElementById('historyCount');
+  const select = document.getElementById('historySessionSelect');
+  if (!list || !countEl) return;
   
-  // Filter out entries that have no translation yet (still "Translating...")
-  const finalized = captionHistory.filter(c => c.translated && c.translated.length > 0);
+  const currentVal = select ? select.value : 'current';
+  
+  let sessions = [];
+  try {
+    const res = await chrome.storage.local.get(['ltSessionHistory']);
+    sessions = res.ltSessionHistory || [];
+  } catch (err) {
+    console.warn('[Popup] Failed to load ltSessionHistory:', err);
+  }
+  
+  if (select) {
+    select.innerHTML = '<option value="current">Active Session</option>';
+    sessions.forEach(sess => {
+      const opt = document.createElement('option');
+      opt.value = sess.id;
+      
+      const startTime = sess.startTime || Date.now();
+      const timeStr = new Date(startTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+      const dateStr = new Date(startTime).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' });
+      const cleanTitle = sess.title && sess.title.length > 20 ? sess.title.substring(0, 20) + '...' : (sess.title || 'Live Stream');
+      opt.textContent = `[${timeStr} ${dateStr}] ${cleanTitle}`;
+      select.appendChild(opt);
+    });
+    
+    const exists = Array.from(select.options).some(opt => opt.value === currentVal);
+    select.value = exists ? currentVal : 'current';
+  }
+  
+  const selectedSession = select ? select.value : 'current';
+  let targetCaptions = [];
+  if (selectedSession === 'current') {
+    targetCaptions = captionHistory || [];
+  } else {
+    const found = sessions.find(s => s.id === selectedSession);
+    if (found) {
+      targetCaptions = found.captions || [];
+    }
+  }
+  
+  const finalized = targetCaptions.filter(c => c.translated && c.translated.length > 0);
   countEl.textContent = finalized.length + ' lines';
   
   if (finalized.length === 0) {
@@ -1384,7 +2034,6 @@ function renderHistoryPanel() {
     </div>
   `).join('');
   
-  // Auto-scroll to bottom
   list.scrollTop = list.scrollHeight;
 }
 
@@ -1396,17 +2045,22 @@ function escapeHtml(text) {
 
 function updateHistoryBadge() {
   const badge = document.getElementById('historyBadge');
-  const finalized = captionHistory.filter(c => c.translated && c.translated.length > 0);
-  if (finalized.length > 0) {
-    badge.style.display = 'block';
-    badge.textContent = finalized.length > 99 ? '99+' : finalized.length;
-  } else {
-    badge.style.display = 'none';
+  if (badge) {
+    const finalized = captionHistory.filter(c => c.translated && c.translated.length > 0);
+    if (finalized.length > 0) {
+      badge.style.display = 'block';
+      badge.textContent = finalized.length > 99 ? '99+' : finalized.length;
+    } else {
+      badge.style.display = 'none';
+    }
   }
+  // The TLDR tab counts the same stream, so keep its line counter live too.
+  updateTldrSessionInfo();
 }
 
-function copyAllCaptions() {
-  const finalized = captionHistory.filter(c => c.translated && c.translated.length > 0);
+async function copyAllCaptions() {
+  const targetCaptions = await getSelectedSessionCaptions();
+  const finalized = targetCaptions.filter(c => c.translated && c.translated.length > 0);
   if (finalized.length === 0) {
     toast('warning', 'No subtitles to copy.');
     return;
@@ -1415,17 +2069,19 @@ function copyAllCaptions() {
   const text = finalized.map(c => `[${c.time}] ${c.translated}\n         ${c.original}`).join('\n\n');
   navigator.clipboard.writeText(text).then(() => {
     toast('success', `Copied ${finalized.length} lines of captions!`);
-    // Flash the copy button
     const btn = document.getElementById('copyAllCaptions');
-    btn.style.color = 'var(--success)';
-    setTimeout(() => { btn.style.color = ''; }, 1500);
+    if (btn) {
+      btn.style.color = 'var(--success)';
+      setTimeout(() => { btn.style.color = ''; }, 1500);
+    }
   }).catch(() => {
     toast('error', 'Copy failed. Try again.');
   });
 }
 
-function exportCaptionsTxt() {
-  const finalized = captionHistory.filter(c => c.translated && c.translated.length > 0);
+async function exportCaptionsTxt() {
+  const targetCaptions = await getSelectedSessionCaptions();
+  const finalized = targetCaptions.filter(c => c.translated && c.translated.length > 0);
   if (finalized.length === 0) {
     toast('warning', 'No subtitles to export.');
     return;
@@ -1457,6 +2113,247 @@ function exportCaptionsTxt() {
   URL.revokeObjectURL(url);
   
   toast('success', `Exported ${finalized.length} lines → ${filename}`);
+}
+
+// ─── TLDR video → post ──────────────────────────────────────────────────────
+// The TLDR tab reads the whole video through Whisper first (the same capture
+// pipeline Live Captions uses), then feeds the transcript to the provider
+// picked in Options (Groq or OpenAI) to boil it down to one post.
+
+function transcriptLinesFrom(captions) {
+  // The spoken original is the real transcript; fall back to the translated
+  // line for captions where the original side wasn't kept.
+  return captions
+    .map(c => (c.original && c.original.trim()) || (c.translated && c.translated.trim()) || '')
+    .filter(Boolean);
+}
+
+function updateTldrCaptureUI() {
+  const btnText = document.getElementById('tldrCaptureBtnText');
+  if (!btnText) return;
+  const dot = document.getElementById('tldrCaptureDot');
+  const state = document.getElementById('tldrCaptureState');
+  if (ltListening) {
+    btnText.textContent = 'Stop reading';
+    if (dot) { dot.style.background = 'var(--danger)'; dot.style.boxShadow = '0 0 6px var(--danger)'; }
+    if (state) state.textContent = 'Reading video audio…';
+  } else {
+    btnText.textContent = 'Read video (Whisper)';
+    if (dot) { dot.style.background = '#64748b'; dot.style.boxShadow = 'none'; }
+    if (state) state.textContent = 'Not reading';
+  }
+  updateTldrSessionInfo();
+}
+
+async function updateTldrSessionInfo() {
+  const select = document.getElementById('tldrSessionSelect');
+  const info = document.getElementById('tldrSessionInfo');
+  if (!select || !info) return;
+  const captions = await getSessionCaptions(select.value || 'current');
+  info.textContent = `${transcriptLinesFrom(captions).length} lines captured`;
+}
+
+async function renderTldrSessionSelect() {
+  const select = document.getElementById('tldrSessionSelect');
+  if (!select) return;
+  const currentVal = select.value || 'current';
+
+  let sessions = [];
+  try {
+    const res = await chrome.storage.local.get(['ltSessionHistory']);
+    sessions = res.ltSessionHistory || [];
+  } catch (err) {
+    console.warn('[TLDR] Failed to load session history:', err);
+  }
+
+  select.innerHTML = '<option value="current">Active Session (just captured)</option>';
+  sessions.forEach(sess => {
+    const opt = document.createElement('option');
+    opt.value = sess.id;
+    const startTime = sess.startTime || Date.now();
+    const timeStr = new Date(startTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+    const dateStr = new Date(startTime).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' });
+    const cleanTitle = sess.title && sess.title.length > 20 ? sess.title.substring(0, 20) + '...' : (sess.title || 'Live Stream');
+    opt.textContent = `[${timeStr} ${dateStr}] ${cleanTitle}`;
+    select.appendChild(opt);
+  });
+
+  const exists = Array.from(select.options).some(opt => opt.value === currentVal);
+  select.value = exists ? currentVal : 'current';
+  updateTldrSessionInfo();
+}
+
+// Runs INSIDE the target page (via chrome.scripting.executeScript), so it must
+// stay self-contained. Finds a directly downloadable media URL: <video>/<source>
+// src attributes plus og:video-style metadata, skipping blob: (MSE) and
+// m3u8/mpd manifests that Whisper can't ingest.
+function scanPageForVideo() {
+  const urls = [];
+  const push = (u) => {
+    if (u && /^https?:/i.test(u) && !/\.(m3u8|mpd)([?#]|$)/i.test(u)) urls.push(u);
+  };
+  document.querySelectorAll('video').forEach(v => {
+    push(v.currentSrc);
+    push(v.src);
+    v.querySelectorAll('source').forEach(s => push(s.src));
+  });
+  ['og:video:secure_url', 'og:video:url', 'og:video', 'twitter:player:stream'].forEach(p => {
+    const el = document.querySelector('meta[property="' + p + '"], meta[name="' + p + '"]');
+    if (el && el.content) push(el.content);
+  });
+  const direct = urls.find(u => /\.(mp4|webm|mov|m4v|m4a|mp3|ogg|wav)([?#]|$)/i.test(u)) || urls[0] || null;
+  return { url: direct, title: document.title || '' };
+}
+
+// Fast hidden reading: the background fetches the video file itself and
+// transcribes the whole thing in one Whisper call — no playback, no waiting
+// out the video's runtime. On X the file comes from the syndication API; on
+// any other site we scan the page for a direct media URL. Falls back to the
+// realtime capture path via toasts.
+async function autoReadTldr() {
+  let tab = null;
+  try {
+    if (currentActiveTabId) tab = await chrome.tabs.get(currentActiveTabId);
+  } catch (err) { /* tab may be gone — re-query below */ }
+  if (!tab || !tab.url) {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      tab = tabs && tabs[0];
+    } catch (err) { /* leave tab null */ }
+  }
+
+  const m = tab && tab.url ? tab.url.match(/(?:twitter\.com|x\.com)\/[^/]+\/status\/(\d+)/) : null;
+
+  // Off X, scan the page itself for a direct media URL. That needs cross-site
+  // access (inject the scanner + let the background download the file) — an
+  // optional permission Chrome asks the user for exactly once.
+  let payload = null;
+  if (m) {
+    payload = { action: 'tldrAutoRead', tweetId: m[1], title: tab.title || '' };
+  } else {
+    if (!tab || !tab.id || !/^https?:/i.test(tab.url || '')) {
+      toast('warning', 'Open the page with the video first, or use "Read video (Whisper)".');
+      return;
+    }
+    let granted = false;
+    try {
+      granted = await chrome.permissions.contains({ origins: ['https://*/*'] });
+      if (!granted) granted = await chrome.permissions.request({ origins: ['https://*/*'] });
+    } catch (err) { /* treated as denied below */ }
+    if (!granted) {
+      toast('warning', 'Auto-read outside X needs site access. Allow it when asked, or use "Read video (Whisper)".');
+      return;
+    }
+    let scan = null;
+    try {
+      const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: scanPageForVideo });
+      scan = results && results[0] ? results[0].result : null;
+    } catch (err) {
+      toast('error', 'Could not read this page. Use "Read video (Whisper)" instead.');
+      return;
+    }
+    if (!scan || !scan.url) {
+      toast('warning', 'No downloadable video found on this page (streaming players hide the file). Use "Read video (Whisper)" instead.');
+      return;
+    }
+    payload = { action: 'tldrAutoRead', videoUrl: scan.url, title: scan.title || tab.title || '' };
+  }
+
+  const btn = document.getElementById('tldrAutoReadBtn');
+  const btnText = document.getElementById('tldrAutoReadBtnText');
+  const prevText = btnText ? btnText.textContent : '';
+  if (btn) btn.disabled = true;
+  if (btnText) btnText.textContent = 'Reading video (hidden)…';
+
+  try {
+    const res = await sendMessage(payload);
+    if (res && res.success) {
+      const area = document.getElementById('tldrResultArea');
+      const body = document.getElementById('tldrResultBody');
+      const meta = document.getElementById('tldrResultMeta');
+      if (body) body.textContent = res.post;
+      if (meta) meta.textContent = `${res.post.length} chars · auto-read (${(res.transcriptChars || 0).toLocaleString()} chars transcript) · ${res.provider} · ${res.model}`;
+      if (area) area.style.display = 'block';
+      toast('success', 'TLDR post ready — copy and share it.');
+    } else {
+      toast('error', (res && res.error) || 'Auto-read failed. Try "Read video (Whisper)".');
+    }
+  } catch (err) {
+    toast('error', 'Auto-read failed: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (btnText) btnText.textContent = prevText;
+  }
+}
+
+async function generateTldrPost() {
+  const select = document.getElementById('tldrSessionSelect');
+  const sessionId = select ? (select.value || 'current') : 'current';
+  const captions = await getSessionCaptions(sessionId);
+  const lines = transcriptLinesFrom(captions);
+  if (lines.length === 0) {
+    toast('warning', 'No transcript yet. Press "Read video (Whisper)" and play the video first.');
+    return;
+  }
+  if (ltListening && sessionId === 'current') {
+    toast('warning', 'Still reading — for a full-video TLDR, stop reading when the video ends first.');
+  }
+
+  // A past session carries the page title it was captured on — give it to the
+  // AI as context for what the video is about.
+  let title = '';
+  if (sessionId !== 'current') {
+    try {
+      const res = await chrome.storage.local.get(['ltSessionHistory']);
+      const found = (res.ltSessionHistory || []).find(s => s.id === sessionId);
+      if (found && found.title) title = found.title;
+    } catch (err) { /* title is optional context */ }
+  }
+
+  const btn = document.getElementById('tldrVideoBtn');
+  const btnText = document.getElementById('tldrVideoBtnText');
+  const prevText = btnText ? btnText.textContent : '';
+  if (btn) btn.disabled = true;
+  if (btnText) btnText.textContent = 'Summarizing…';
+
+  try {
+    const res = await sendMessage({ action: 'tldrVideo', transcript: lines.join('\n'), title });
+    if (res && res.success) {
+      const area = document.getElementById('tldrResultArea');
+      const body = document.getElementById('tldrResultBody');
+      const meta = document.getElementById('tldrResultMeta');
+      if (body) body.textContent = res.post;
+      if (meta) meta.textContent = `${res.post.length} chars · ${res.provider} · ${res.model}`;
+      if (area) area.style.display = 'block';
+      toast('success', 'TLDR post ready — copy and share it.');
+    } else {
+      toast('error', (res && res.error) || 'TLDR failed. Try again.');
+    }
+  } catch (err) {
+    toast('error', 'TLDR failed: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (btnText) btnText.textContent = prevText;
+  }
+}
+
+function copyTldrPost() {
+  const body = document.getElementById('tldrResultBody');
+  const text = body ? body.textContent : '';
+  if (!text) {
+    toast('warning', 'Nothing to copy yet.');
+    return;
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    toast('success', 'Post copied!');
+    const btn = document.getElementById('copyTldrPost');
+    if (btn) {
+      btn.style.color = 'var(--success)';
+      setTimeout(() => { btn.style.color = ''; }, 1500);
+    }
+  }).catch(() => {
+    toast('error', 'Copy failed. Try again.');
+  });
 }
 
 async function openSidePanel() {
@@ -1534,6 +2431,16 @@ async function loadCaptionHistoryFromStorage() {
     }
   } catch (e) {
     console.warn('[Popup] Failed to load caption history:', e);
+  } finally {
+    // Mark history as loaded and flush any queued subtitle messages
+    isHistoryLoaded = true;
+    if (pendingSubtitleMessages.length > 0) {
+      console.log('[Popup] Flushing', pendingSubtitleMessages.length, 'queued subtitle message(s).');
+      const queued = pendingSubtitleMessages.splice(0);
+      queued.forEach(msg => {
+        appendSubtitleMarkup(msg.original, msg.translated, msg.isUpdate, msg.segmentId);
+      });
+    }
   }
 }
 
@@ -1569,25 +2476,51 @@ function showLiveCaptureError(err, tabUrl) {
   const container = document.getElementById('liveSubtitleContainer');
   if (!container) return;
 
+  const isRestricted = isRestrictedUrl(tabUrl);
+  const titleText = isRestricted ? 'Capture Restricted on This Page' : 'Could Not Start Captions';
+  const icon = isRestricted ? '⚠️' : '🎧';
+  const color = isRestricted ? 'var(--warning)' : '#6366f1';
+
+  let descriptionHtml = '';
+  let stepsHtml = '';
+
+  if (isRestricted) {
+    descriptionHtml = `Chrome policies strictly restrict audio/video capture on system pages (such as <code>chrome://...</code>, Chrome Web Store, or empty new tabs).`;
+    stepsHtml = `
+      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 11.5px; color: var(--text); line-height: 1.4;">
+        <div style="display: flex; align-items: flex-start; gap: 6px;">
+          <span style="background: var(--warning); color: #000; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;">1</span>
+          <span>Please open any standard website containing audio or video (e.g., YouTube.com, X.com, or your learning/movie site).</span>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 6px;">
+          <span style="background: var(--warning); color: #000; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;">2</span>
+          <span>Then open AutoMind from the toolbar icon on that tab and click <b>Start Live Captions</b>.</span>
+        </div>
+      </div>
+    `;
+  } else {
+    descriptionHtml = `Chrome only lets an extension capture a tab's audio after you have invoked the extension on that tab. Opening AutoMind from the toolbar icon is what grants it.`;
+    stepsHtml = `
+      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 11.5px; color: var(--text); line-height: 1.4;">
+        <div style="display: flex; align-items: flex-start; gap: 6px;">
+          <span style="background: #6366f1; color: #fff; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;">1</span>
+          <span>Click the <b>AutoMind icon in the Chrome toolbar</b> while this tab is open — that grants access to it.</span>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 6px;">
+          <span style="background: #6366f1; color: #fff; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;">2</span>
+          <span>Then press <b>Start Live Captions</b> in the popup that opens.</span>
+        </div>
+      </div>
+    `;
+  }
+
   const titleHtml = `
-    <div style="display: flex; align-items: center; gap: 8px; color: var(--warning); font-weight: 600; font-size: 13px; margin-bottom: 8px;">
-      <span style="font-size: 15px;">⚠️</span>
-      <span>Capture Restricted on This Page</span>
+    <div style="display: flex; align-items: center; gap: 8px; color: ${color}; font-weight: 600; font-size: 13px; margin-bottom: 8px;">
+      <span style="font-size: 15px;">${icon}</span>
+      <span>${titleText}</span>
     </div>
     <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.45;">
-      Chrome policies strictly restrict audio/video capture on system pages (such as <code>chrome://...</code>, Chrome Web Store, or empty new tabs).
-    </div>
-  `;
-  const stepsHtml = `
-    <div style="display: flex; flex-direction: column; gap: 8px; font-size: 11.5px; color: var(--text); line-height: 1.4;">
-      <div style="display: flex; align-items: flex-start; gap: 6px;">
-        <span style="background: var(--warning); color: #000; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;">1</span>
-        <span>Please open any standard website containing audio or video (e.g., YouTube.com, X.com, or your learning/movie site).</span>
-      </div>
-      <div style="display: flex; align-items: flex-start; gap: 6px;">
-        <span style="background: var(--warning); color: #000; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;">2</span>
-        <span>Click the <b>Start Live Captions</b> button directly in this Sidebar to begin capturing and translating immediately!</span>
-      </div>
+      ${descriptionHtml}
     </div>
   `;
 
@@ -1621,94 +2554,122 @@ function showLiveCaptureError(err, tabUrl) {
   container.scrollTop = container.scrollHeight;
 }
 
-function showSecureGestureOverlay() {
-  const overlay = document.createElement('div');
-  overlay.id = 'secureGestureOverlay';
-  overlay.style.cssText = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: radial-gradient(circle at top, #1e1b4b 0%, #090d16 100%);
-    z-index: 99999;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-    text-align: center;
-    animation: fadeIn 0.3s ease;
-  `;
+// Language display names for the voice panel label
+const _LT_LANG_DISPLAY = {
+  'en': 'English', 'vi': 'Vietnamese', 'zh': 'Chinese', 'ja': 'Japanese',
+  'ko': 'Korean', 'fr': 'French', 'es': 'Spanish', 'de': 'German',
+  'ru': 'Russian', 'th': 'Thai', 'hi': 'Hindi', 'ar': 'Arabic',
+  'nl': 'Dutch', 'tl': 'Filipino', 'pl': 'Polish', 'bn': 'Bengali',
+  'ur': 'Urdu', 'ms': 'Malay', 'fa': 'Persian', 'sw': 'Swahili',
+  'uk': 'Ukrainian', 'ro': 'Romanian', 'el': 'Greek', 'he': 'Hebrew',
+  'sv': 'Swedish', 'da': 'Danish', 'no': 'Norwegian', 'fi': 'Finnish',
+  'cs': 'Czech', 'hu': 'Hungarian', 'sk': 'Slovak', 'bg': 'Bulgarian',
+  'hr': 'Croatian', 'sr': 'Serbian', 'ka': 'Georgian', 'az': 'Azerbaijani',
+  'kk': 'Kazakh', 'mn': 'Mongolian'
+};
 
-  overlay.innerHTML = `
-    <div class="pulsing-mic-glow" style="display: inline-flex; align-items: center; justify-content: center; width: 72px; height: 72px; border-radius: 50%; background: rgba(99, 102, 241, 0.12); color: var(--primary); margin-bottom: 20px; animation: pulse 2s infinite ease-in-out; border: 1px solid rgba(99, 102, 241, 0.25); box-shadow: 0 0 15px rgba(99, 102, 241, 0.15);">
-      <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-        <line x1="12" y1="19" x2="12" y2="23"/>
-        <line x1="8" y1="23" x2="16" y2="23"/>
-      </svg>
-    </div>
-    
-    <h3 style="font-size: 17px; font-weight: 700; color: #fff; margin-bottom: 10px; font-family: var(--font); letter-spacing: 0.3px;">
-      Start Live Translation
-    </h3>
-    
-    <p style="font-size: 12.5px; color: var(--text-muted); max-width: 290px; margin-bottom: 28px; line-height: 1.5; font-family: var(--font);">
-      Chrome security requires a single click to authorize tab audio translation. Captions will automatically stream in the sidebar once started!
-    </p>
-    
-    <button id="secureConfirmBtn" style="
-      width: 100%;
-      max-width: 250px;
-      padding: 12px 20px;
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 10px;
-      background: var(--primary-gradient);
-      color: #fff;
-      font-size: 13.5px;
-      font-weight: 600;
-      font-family: var(--font);
-      cursor: pointer;
-      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
-      transition: all 0.2s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-    ">
-      <span>🚀 Click to Launch (Start)</span>
-    </button>
-  `;
+// Default voices per language for a natural first-run experience
+const _LT_DEFAULT_VOICES = {
+  'vi': 'nova', 'en': 'alloy', 'zh': 'echo', 'ja': 'shimmer',
+  'ko': 'shimmer', 'fr': 'fable', 'es': 'nova', 'de': 'onyx',
+  'ru': 'echo', 'th': 'nova', 'hi': 'coral', 'ar': 'onyx',
+  'default': 'alloy'
+};
 
-  document.body.appendChild(overlay);
+async function updateVoiceGroupVisibility() {
+  try {
+    const settingsRes = await chrome.storage.sync.get(['ltTtsChromeVoiceMap']);
+    const localRes = await chrome.storage.local.get(['ltTtsChromeVoiceMap', 'ltTgtLang', 'ltTtsGender', 'ltTtsEnabled']);
+    const ttsEnabled = !!localRes.ltTtsEnabled;
+    const chromeGroup = document.getElementById('ltTtsChromeGroup');
+    const chromeVoiceGroup = document.getElementById('ltTtsChromeVoiceGroup');
 
-  const confirmBtn = overlay.querySelector('#secureConfirmBtn');
-  
-  confirmBtn.addEventListener('mouseenter', () => {
-    confirmBtn.style.transform = 'translateY(-1px)';
-    confirmBtn.style.boxShadow = '0 6px 20px rgba(99, 102, 241, 0.45)';
-    confirmBtn.style.filter = 'brightness(1.1)';
-  });
-  confirmBtn.addEventListener('mouseleave', () => {
-    confirmBtn.style.transform = 'none';
-    confirmBtn.style.boxShadow = '0 4px 15px rgba(99, 102, 241, 0.3)';
-    confirmBtn.style.filter = 'none';
-  });
+    // The original-audio choice only means anything while TTS is speaking
+    const originalAudioRow = document.getElementById('ltTtsOriginalAudioRow');
+    if (originalAudioRow) originalAudioRow.style.display = ttsEnabled ? 'flex' : 'none';
 
-  confirmBtn.addEventListener('click', async () => {
-    overlay.remove();
-    
-    // Query active tab synchronously inside gesture context as bulletproof fallback targeting lastFocusedWindow
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }, async ([tab]) => {
-      if (tab) {
-        currentActiveTabId = tab.id;
-      }
+    // If TTS is disabled, hide all voice selectors and return early
+    if (!ttsEnabled) {
+      if (chromeGroup) chromeGroup.style.display = 'none';
+      if (chromeVoiceGroup) chromeVoiceGroup.style.display = 'none';
+      return;
+    }
+
+    // Get current output language
+    const lang = document.getElementById('ltTgtLang')?.value
+               || localRes.ltTgtLang || 'vi';
+
+    if (chrome.tts && typeof chrome.tts.getVoices === 'function') {
+      chrome.tts.getVoices(async (voices) => {
+        const targetPrefix = lang.split('-')[0].toLowerCase();
+        const matchingVoices = (voices || []).filter(v => {
+          if (!v.lang) return false;
+          const vPrefix = v.lang.split('-')[0].toLowerCase();
+          return vPrefix === targetPrefix;
+        });
+
+        if (matchingVoices.length > 0) {
+          // Show system voice selection, hide general gender selection
+          if (chromeGroup) chromeGroup.style.display = 'none';
+          if (chromeVoiceGroup) chromeVoiceGroup.style.display = 'block';
+
+          const chromeVoiceSelect = document.getElementById('ltTtsChromeVoiceSelect');
+          const chromeVoiceLangLabel = document.getElementById('ltTtsChromeVoiceLangLabel');
+          
+          if (chromeVoiceLangLabel) {
+            chromeVoiceLangLabel.textContent = _LT_LANG_DISPLAY[lang] || lang.toUpperCase();
+          }
+
+          if (chromeVoiceSelect) {
+            const storedVoiceMap = Object.assign(
+              {},
+              settingsRes.ltTtsChromeVoiceMap || {},
+              localRes.ltTtsChromeVoiceMap || {}
+            );
+            const selectedVoice = storedVoiceMap[lang] || '';
+
+            // Clear matching options, keep the first "Default" option
+            while (chromeVoiceSelect.options.length > 1) {
+              chromeVoiceSelect.remove(1);
+            }
+
+            matchingVoices.forEach(v => {
+              const opt = document.createElement('option');
+              opt.value = v.voiceName;
+              const genderStr = v.gender ? ` (${v.gender})` : '';
+              opt.textContent = `${v.voiceName}${genderStr}`;
+              chromeVoiceSelect.appendChild(opt);
+            });
+
+            // Check if selected voice is in the list, otherwise use default ""
+            if (matchingVoices.some(v => v.voiceName === selectedVoice)) {
+              chromeVoiceSelect.value = selectedVoice;
+            } else {
+              chromeVoiceSelect.value = '';
+            }
+          }
+        } else {
+          // Hide system voice selection, show general gender selection
+          if (chromeGroup) chromeGroup.style.display = 'block';
+          if (chromeVoiceGroup) chromeVoiceGroup.style.display = 'none';
+          
+          const ttsGenderSelect = document.getElementById('ltTtsGenderSelect');
+          if (ttsGenderSelect) {
+            ttsGenderSelect.value = localRes.ltTtsGender || 'female';
+          }
+        }
+      });
+    } else {
+      // Fallback: No chrome.tts API or list doesn't load
+      if (chromeGroup) chromeGroup.style.display = 'block';
+      if (chromeVoiceGroup) chromeVoiceGroup.style.display = 'none';
       
-      console.log('🎙️ [Popup] Secure gesture confirm clicked. Direct start initiated on tab:', currentActiveTabId);
-      // Synchronously call toggleLiveTranslation inside the user click stack with fromOverlay = true!
-      await toggleLiveTranslation(true);
-    });
-  });
+      const ttsGenderSelect = document.getElementById('ltTtsGenderSelect');
+      if (ttsGenderSelect) {
+        ttsGenderSelect.value = localRes.ltTtsGender || 'female';
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to update voice group visibility:', e);
+  }
 }

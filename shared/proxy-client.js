@@ -14,7 +14,7 @@ self.PROXY_CLIENT = {
 
   // POST { provider, model, payload } to /proxy
   async call(provider, model, payload) {
-    const proxyUrl = (self.ADMIN_DEFAULTS && self.ADMIN_DEFAULTS.proxyUrl) || '';
+    const proxyUrl = (self.ADMIN_DEFAULTS && self.ADMIN_DEFAULTS.proxyUrl) || 'https://automind-proxy.dev102vn.workers.dev';
     if (!proxyUrl) throw new Error('Proxy URL not configured');
 
     const installId = await this.getInstallId();
@@ -39,7 +39,7 @@ self.PROXY_CLIENT = {
   },
 
   async getQuota() {
-    const proxyUrl = (self.ADMIN_DEFAULTS && self.ADMIN_DEFAULTS.proxyUrl) || '';
+    const proxyUrl = (self.ADMIN_DEFAULTS && self.ADMIN_DEFAULTS.proxyUrl) || 'https://automind-proxy.dev102vn.workers.dev';
     if (!proxyUrl) return null;
     const installId = await this.getInstallId();
     const res = await fetch(`${proxyUrl}/quota`, { headers: { 'X-Install-Id': installId } });

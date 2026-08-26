@@ -7,46 +7,22 @@ class MultiLanguageHumanizer {
     loadLanguagePatterns() {
         return {
             'vi': {
+                // Only genuinely robotic openers belong here. Everyday connectives
+                // ("tuy nhiên", "vì vậy", "như vậy", "nhìn chung", "về cơ bản") were
+                // removed: they are normal spoken Vietnamese, and deleting them
+                // mid-sentence mangled real replies — e.g. "ai cũng có những ngày
+                // như vậy." became "ai cũng có những ngày ." It also contradicted
+                // the generation prompt, which explicitly says to keep connectors.
                 aiPatterns: [
-                    'như một ai', 'tôi là trí tuệ nhân tạo', 'hơn nữa', 'thêm vào đó',
-                    'điều quan trọng là', 'bạn nên xem xét', 'tôi nghĩ rằng bạn nên',
-                    'tuy nhiên', 'do đó', 'vì vậy', 'như vậy', 'có thể thấy rằng',
-                    'tóm lại', 'kết luận', 'nhìn chung', 'về cơ bản', 'tôi khuyên bạn'
+                    'như một ai', 'tôi là trí tuệ nhân tạo', 'là một trí tuệ nhân tạo',
+                    'với tư cách là một ai', 'tôi không thể', 'tôi nghĩ rằng bạn nên',
+                    'bạn nên xem xét', 'tôi khuyên bạn', 'có thể thấy rằng',
+                    'điều quan trọng cần lưu ý là', 'tóm lại thì'
                 ],
-                naturalReplacements: {
-                    'thực sự thú vị': 'hay đấy',
-                    'rất quan trọng': 'quan trọng',
-                    'cần phải': 'nên',
-                    'tôi nghĩ rằng': 'thấy',
-                    'điều này': 'cái này',
-                    'phát triển đáng kể': 'bay mạnh',
-                    'xu hướng tích cực': 'trend ngon',
-                    'điều này rất quan trọng': 'cái này quan trọng',
-                    'cần phải xem xét': 'nên soi',
-                    'tôi khuyên bạn nên': 'nên',
-                    'đây là một': 'đây là',
-                    'rất có thể': 'dễ là',
-                    'chắc chắn': 'chắc luôn',
-                    'đồng ý': 'chuẩn luôn',
-                    'tuyệt vời': 'đỉnh chóp',
-                    'không thể tin được': 'ảo thật đấy',
-                    'chúc mừng': 'chúc mừng sếp'
-                },
-                hooks: [
-                    'Ủa', 'Ơ', 'Thật luôn', 'Đợi đã', 'Ủa alo', 'Kìa', 'Tính ra', 'Cơ mà', 'Nói thật', 'Chuẩn', 'Gớm', 'Ái chà'
-                ],
-                cryptoSlang: [
-                    'sếp', 'chủ tịch', 'uy tín', 'lên luôn', 'cháy', 'đỉnh', 'lùa gà', 'đu đỉnh', 'bắt đáy', 'ví', 'sàn', 'bay mạnh', 'fomo', 'fud'
-                ],
-                contractions: {
-                    'không': 'ko',
-                    'được': 'đc',
-                    'nhưng': 'nhưg',
-                    'người': 'ng',
-                    'gì': 'j',
-                    'biết': 'bít',
-                    'quá': 'qá'
-                }
+                naturalReplacements: {},
+                hooks: [],
+                cryptoSlang: [],
+                contractions: {}
             },
             'en': {
                 aiPatterns: [
@@ -56,39 +32,10 @@ class MultiLanguageHumanizer {
                     'additionally', 'in conclusion', 'to summarize',
                     'it is worth noting', 'in summary'
                 ],
-                naturalReplacements: {
-                    'this is interesting': 'based',
-                    'very important': 'big if true',
-                    'you should': 'u should',
-                    'i believe that': 'imo',
-                    'this situation': 'this',
-                    'significant growth': 'moon',
-                    'positive momentum': 'up only',
-                    'it\'s important to note': 'fr',
-                    'you should consider': 'maybe',
-                    'i would recommend': 'try',
-                    'this is a': 'this is',
-                    'it is very likely': 'probs'
-                },
-                hooks: [
-                    'Based', 'Honestly', 'Wait', 'Wow', 'Fr', 'Yo', 'Damn', 'Yoo', 'Bruh', 'No cap'
-                ],
-                cryptoSlang: [
-                    'ser', 'fren', 'ngmi', 'wagmi', 'gm', 'gn', 'tbh', 'fam', 'anon', 'lfg', 'bags', 'whale'
-                ],
-                contractions: {
-                    'do not': 'dont',
-                    'cannot': 'cant',
-                    'will not': 'wont',
-                    'should not': 'shouldnt',
-                    'would not': 'wouldnt',
-                    'it is': 'its',
-                    'you are': 'ure',
-                    'they are': 'theyre',
-                    'for real': 'fr',
-                    'to be honest': 'tbh',
-                    'not gonna lie': 'ngl'
-                }
+                naturalReplacements: {},
+                hooks: [],
+                cryptoSlang: [],
+                contractions: {}
             },
             'es': {
                 aiPatterns: [
@@ -96,16 +43,9 @@ class MultiLanguageHumanizer {
                     'además', 'sin embargo', 'por lo tanto', 'así que',
                     'es importante', 'deberías considerar', 'recomendaría'
                 ],
-                naturalReplacements: {
-                    'esto es interesante': 'qué bien',
-                    'crecimiento significativo': 'subida brutal',
-                    'momento positivo': 'buena vibra',
-                    'es muy importante': 'clave',
-                    'deberías': 'podrías',
-                    'recomiendo': 'mira'
-                },
-                hooks: ['Oye', 'Wow', 'Vaya', 'Claro'],
-                cryptoSlang: ['fren', 'ser', 'vamos', 'luna'],
+                naturalReplacements: {},
+                hooks: [],
+                cryptoSlang: [],
                 contractions: {}
             }
         };
@@ -130,12 +70,20 @@ class MultiLanguageHumanizer {
         const langPatterns = this.patterns[langCode];
 
         if (langPatterns) {
-            // Step 1: Remove AI patterns
+            // Step 1: Remove AI patterns.
+            // Strip the leftover whitespace too, otherwise removing a phrase
+            // leaves a double space or a stranded " ." before the full stop.
             if (langPatterns.aiPatterns) {
                 langPatterns.aiPatterns.forEach(pattern => {
-                    const regex = new RegExp(`\\b${pattern}\\b`, 'gi');
-                    humanized = humanized.replace(regex, '');
+                    // \b is ASCII-only and does not fire correctly next to
+                    // Vietnamese diacritics, so bound on whitespace/edges instead.
+                    const regex = new RegExp(`(^|\\s)${pattern}(?=$|[\\s,.!?])`, 'gi');
+                    humanized = humanized.replace(regex, '$1');
                 });
+                humanized = humanized
+                    .replace(/\s{2,}/g, ' ')
+                    .replace(/\s+([,.!?])/g, '$1')
+                    .trim();
             }
 
             // Step 2: Apply natural replacements
@@ -271,28 +219,18 @@ class MultiLanguageHumanizer {
             cleaned = cleaned.replace(/[,\.\s\-]+$/, '').trim();
         }
 
-        // ✅ Step D: Smart Casing
-        if (casualTones.includes(tone)) {
-            if (cleaned.length > 0) {
-                // Don't lowercase acronyms (BTC, SOL, GM), @mentions, or #hashtags
-                if (!/^[A-Z]{2,}/.test(cleaned) && !cleaned.startsWith('@') && !cleaned.startsWith('#')) {
-                    cleaned = cleaned.charAt(0).toLowerCase() + cleaned.slice(1);
-                }
-            }
-        } else {
-             // For professional/formal, capitalize first letter
-             if (cleaned.length > 0) {
-                 cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
-             }
+        // ✅ Step D: Smart Casing - Always capitalize first letter of sentences (viết hoa đầu dòng đúng chính tả)
+        if (cleaned.length > 0) {
+            cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
         }
 
-        // ✅ Step E: Smart Contraction Casing — fix weird "Ngl", "Tbh", "Fr" at sentence start
-        const lowercaseContractions = ['ngl', 'tbh', 'fr', 'imo', 'irl', 'smh', 'fomo', 'fud', 'lfg', 'gm', 'gn', 'ser', 'ngmi', 'wagmi'];
-        lowercaseContractions.forEach(abbr => {
-            // Match the weirdly-capitalized form at the start (e.g. "Ngl" → "ngl", "Tbh" → "tbh")
-            const weirdCased = abbr.charAt(0).toUpperCase() + abbr.slice(1).toLowerCase();
-            if (cleaned.startsWith(weirdCased + ' ') || cleaned.startsWith(weirdCased + ',') || cleaned === weirdCased) {
-                cleaned = abbr + cleaned.slice(abbr.length);
+        // ✅ Step E: Smart Contraction Casing - Ensure standard abbreviations at start are capitalized correctly (e.g. "Ngl", "Tbh", "Gm")
+        const contractions = ['ngl', 'tbh', 'fr', 'imo', 'irl', 'smh', 'fomo', 'fud', 'lfg', 'gm', 'gn', 'ser', 'ngmi', 'wagmi'];
+        contractions.forEach(abbr => {
+            const lowerCased = abbr.toLowerCase();
+            const capitalized = abbr.charAt(0).toUpperCase() + abbr.slice(1).toLowerCase();
+            if (cleaned.startsWith(lowerCased + ' ') || cleaned.startsWith(lowerCased + ',') || cleaned === lowerCased) {
+                cleaned = capitalized + cleaned.slice(lowerCased.length);
             }
         });
         

@@ -6,6 +6,7 @@
 <title>AutoMind</title>
 <style>
   :root {
+    color-scheme: dark;
     --bg-0: #090d16;
     --bg-1: #0f1322;
     --bg-2: #1e2338;
@@ -27,6 +28,11 @@
     --radius-sm: 8px;
     --radius-lg: 16px;
     --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  option {
+    background-color: #1e2338 !important; /* var(--bg-2) */
+    color: #f3f4f6 !important; /* var(--text) */
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -762,6 +768,12 @@
     </svg>
     Translate
   </button>
+  <button class="tab" data-tab="tldr">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+    </svg>
+    TLDR
+  </button>
   <button class="tab" data-tab="overview">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/>
@@ -779,11 +791,18 @@
     <div class="lang-row">
       <div class="select-wrap">
         <select id="srcLang">
-          <option value="English" selected>English</option>
+          <option value="auto" selected>🌐 Auto Detect</option>
+          <option value="English">English</option>
           <option value="Vietnamese">Vietnamese (Tiếng Việt)</option>
           <option value="Chinese">Chinese (中文)</option>
           <option value="Japanese">Japanese (日本語)</option>
           <option value="Korean">Korean (한국어)</option>
+          <option value="French">French (Tiếng Pháp)</option>
+          <option value="Spanish">Spanish (Tiếng Tây Ban Nha)</option>
+          <option value="German">German (Tiếng Đức)</option>
+          <option value="Russian">Russian (Tiếng Nga)</option>
+          <option value="Thai">Thai (Tiếng Thái)</option>
+          <option value="Arabic">Arabic (Tiếng Ả Rập)</option>
         </select>
       </div>
       <button class="swap-icon-btn" id="swapLangs" title="Swap languages">
@@ -794,11 +813,17 @@
       </button>
       <div class="select-wrap">
         <select id="tgtLang">
-          <option value="English" selected>English</option>
-          <option value="Vietnamese">Vietnamese (Tiếng Việt)</option>
+          <option value="English">English</option>
+          <option value="Vietnamese" selected>Vietnamese (Tiếng Việt)</option>
           <option value="Chinese">Chinese (中文)</option>
           <option value="Japanese">Japanese (日本語)</option>
           <option value="Korean">Korean (한국어)</option>
+          <option value="French">French (Tiếng Pháp)</option>
+          <option value="Spanish">Spanish (Tiếng Tây Ban Nha)</option>
+          <option value="German">German (Tiếng Đức)</option>
+          <option value="Russian">Russian (Tiếng Nga)</option>
+          <option value="Thai">Thai (Tiếng Thái)</option>
+          <option value="Arabic">Arabic (Tiếng Ả Rập)</option>
         </select>
       </div>
     </div>
@@ -869,14 +894,6 @@
       </button>
     </div>
 
-    <!-- Beautiful Explanatory Tip -->
-    <div class="hide-in-popup" style="background: rgba(99,102,241,0.06); border: 1px dashed rgba(99,102,241,0.25); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 11.5px; line-height: 1.45; display: flex; gap: 8px; align-items: flex-start;">
-      <span style="font-size: 15px; line-height: 1;">💡</span>
-      <div style="color: var(--text-muted);">
-        <strong style="color: var(--text);">Default:</strong> Automatic speech recognition. If you know the exact language of the video/livestream, select it directly for higher accuracy.
-      </div>
-    </div>
-
     <!-- CARD 1: Language & Translation Settings -->
     <div class="live-card hide-in-popup">
       <div class="live-card-title">
@@ -897,6 +914,11 @@
             <option value="crypto">🪙 Crypto, Web3 &amp; Blockchain</option>
             <option value="tech">💻 Technology, Coding &amp; IoT (Tech &amp; Dev)</option>
             <option value="business">📈 Business, Startups &amp; Marketing</option>
+            <option value="gaming">🎮 Gaming, Esports &amp; Streaming</option>
+            <option value="finance">💵 Finance, Economics &amp; Markets</option>
+            <option value="entertainment">🎬 Movies, Music &amp; Pop Culture</option>
+            <option value="education">🎓 Education, Science &amp; History</option>
+            <option value="news">📰 Current Events &amp; News</option>
           </select>
         </div>
       </div>
@@ -1008,15 +1030,21 @@
         </div>
       </div>
 
-      <!-- ASR Speech Engine Selector -->
+      <!-- Speech Engine (ASR) — mirrored from Options so the engine can be
+           switched without leaving the panel. -->
       <div style="margin-bottom: 12px;">
         <label style="display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.5px;">Speech Engine (ASR)</label>
-        <div class="select-wrap">
+        <div class="select-wrap" style="margin-bottom: 8px;">
           <select id="ltAsrEngine">
-            <option value="groq" selected>⚡ Groq Whisper (Premium, Low-latency Tab Audio)</option>
-            <option value="whisper">🤖 OpenAI Whisper (Premium, High-accuracy Tab Audio)</option>
+            <option value="groq">⚡ Groq Whisper — lowest latency</option>
+            <option value="whisper">🎯 OpenAI Whisper — highest accuracy</option>
+            <option value="webSpeech">🆓 Web Speech — free, uses your mic</option>
           </select>
         </div>
+        <div class="select-wrap" id="ltAsrModelWrap">
+          <select id="ltAsrModel"></select>
+        </div>
+        <div id="ltAsrKeyWarning" style="display: none; font-size: 10.5px; color: var(--warning); margin-top: 6px; line-height: 1.4;"></div>
       </div>
 
       <!-- Translation Engine Selector -->
@@ -1025,26 +1053,18 @@
         <div class="select-wrap">
           <select id="ltEngine">
             <option value="google">🌐 Google Translate (Free 100%)</option>
-            <option value="openai">🤖 OpenAI / Premium AI (High Quality)</option>
+            <option value="openai">🤖 Premium AI / OpenAI (Recommended for Tech/Crypto)</option>
           </select>
         </div>
       </div>
 
-      <!-- Latency Preset Selector -->
-      <div style="margin-bottom: 12px;">
-        <label style="display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.5px;">Latency &amp; Accuracy</label>
-        <div class="select-wrap">
-          <select id="ltSegmentPreset">
-            <option value="speed">⚡ Ultra-Low Latency / Fastest (1.5s)</option>
-            <option value="balanced">⚖️ Balanced / Medium (2.5s)</option>
-            <option value="accuracy" selected>🏆 High Accuracy / Standard (3.5s)</option>
-          </select>
-        </div>
+      <div style="font-size: 10.5px; color: var(--text-muted); line-height: 1.45;">
+        💡 Know the stream's language? Select it directly for higher accuracy. Speech engine &amp; API keys: <a href="#" id="openOptionsFromLive" style="color: var(--primary); text-decoration: none; font-weight: 600;">Settings</a>
       </div>
     </div>
 
     <!-- CARD 2: Mode & Advanced Options -->
-    <div class="live-card hide-in-popup">
+    <div class="live-card">
       <div class="live-card-title">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
@@ -1053,23 +1073,13 @@
           <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/>
           <line x1="17" y1="16" x2="23" y2="16"/>
         </svg>
-        <span>Mode &amp; Advanced Options</span>
-      </div>
-
-      <!-- Mode Selector (Hidden for now, defaulting to Tab Audio) -->
-      <div style="display: none !important; gap: 8px; margin-bottom: 12px;">
-        <button class="btn btn-ghost" id="ltModeMic" style="flex: 1; border-color: var(--primary); background: var(--primary-soft); color: var(--text);">
-          🎙️ Microphone
-        </button>
-        <button class="btn btn-ghost" id="ltModeTab" style="flex: 1;">
-          🔊 Tab Audio
-        </button>
+        <span>Voice Readout (TTS)</span>
       </div>
 
       <!-- Voice TTS Toggle -->
       <div style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
         <span style="font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px;">
-          🔊 Voice Readout (TTS)
+          🔊 Read subtitles aloud
         </span>
         <label class="switch">
           <input type="checkbox" id="ltTtsToggle">
@@ -1077,7 +1087,116 @@
         </label>
       </div>
 
+      <!-- What happens to the stream's own audio while TTS reads over it.
+           Only meaningful with TTS on, so the row follows the toggle. -->
+      <div id="ltTtsOriginalAudioRow" style="margin-bottom: 8px; display: none; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
+        <span style="font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px;">
+          🎚️ Original audio
+        </span>
+        <select id="ltTtsOriginalAudio" style="background: var(--bg-0); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; font-size: 12.5px; outline: none; font-family: var(--font); cursor: pointer; width: 110px;">
+          <option value="mute" selected>Mute it</option>
+          <option value="low">Keep it quiet (15%)</option>
+          <option value="keep">Keep it full</option>
+        </select>
+      </div>
 
+      <!-- TTS Speed Select -->
+      <div style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
+        <span style="font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px;">
+          ⚡ TTS Speed
+        </span>
+        <select id="ltTtsSpeedSelect" style="background: var(--bg-0); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; font-size: 12.5px; outline: none; font-family: var(--font); cursor: pointer; width: 110px;">
+          <option value="1.0">1.0x (Slow / Relaxed)</option>
+          <option value="1.1">1.1x</option>
+          <option value="1.15">1.15x</option>
+          <option value="1.2">1.2x</option>
+          <option value="1.25" selected>1.25x (Recommended – keeps pace with subs)</option>
+          <option value="1.3">1.3x</option>
+          <option value="1.4">1.4x</option>
+          <option value="1.5">1.5x (Fastest)</option>
+        </select>
+      </div>
+
+
+      <!-- Chrome TTS Voice Gender Select -->
+      <div id="ltTtsChromeGroup" style="margin-bottom: 8px; display: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+          <span style="font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">🗣️ Voice Gender</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <select id="ltTtsGenderSelect" style="flex: 1; background: var(--bg-0); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; font-size: 12.5px; outline: none; font-family: var(--font); cursor: pointer;">
+            <option value="female" selected>Female — Giọng Nữ</option>
+            <option value="male">Male — Giọng Nam</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Chrome/System TTS Specific Voice Select -->
+      <div id="ltTtsChromeVoiceGroup" style="margin-bottom: 8px; display: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+          <span style="font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">🗣️ System Voice</span>
+          <span id="ltTtsChromeVoiceLangLabel" style="font-size: 11px; color: var(--primary); font-weight: 600;"></span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <select id="ltTtsChromeVoiceSelect" style="flex: 1; background: var(--bg-0); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; font-size: 12.5px; outline: none; font-family: var(--font); cursor: pointer;">
+            <option value="">Default (Use Gender Setting)</option>
+          </select>
+        </div>
+        <div style="margin-top: 5px; font-size: 10.5px; color: var(--text-muted);">Specific voice for the output language. If unsupported, falls back to gender choice.</div>
+      </div>
+
+
+    </div>
+
+    <!-- CARD 3: On-page subtitle overlay -->
+    <div class="live-card">
+      <div class="live-card-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="5" width="20" height="14" rx="2" ry="2"/>
+          <line x1="6" y1="15" x2="12" y2="15"/><line x1="15" y1="15" x2="18" y2="15"/>
+        </svg>
+        <span>On-screen Subtitles</span>
+      </div>
+
+      <div style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
+        <span style="font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px;">
+          🎨 Caption style
+        </span>
+        <select id="ltSubtitleStyle" style="background: var(--bg-0); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; font-size: 12.5px; outline: none; font-family: var(--font); cursor: pointer; width: 110px;">
+          <option value="netflix" selected>Outlined</option>
+          <option value="karaoke">Big &amp; bold</option>
+          <option value="bar">Bottom bar</option>
+          <option value="contrast">High contrast</option>
+          <option value="minimal">Minimal</option>
+          <option value="card">Dark card</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
+        <span style="font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px;">
+          🗂️ Lines kept on screen
+        </span>
+        <select id="ltSubtitleLines" style="background: var(--bg-0); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; font-size: 12.5px; outline: none; font-family: var(--font); cursor: pointer; width: 110px;">
+          <option value="1">1 (replace)</option>
+          <option value="2">2 lines</option>
+          <option value="3" selected>3 lines</option>
+          <option value="4">4 lines</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;">
+        <span style="font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px;">
+          ⌨️ Reveal text as spoken
+        </span>
+        <label class="switch">
+          <input type="checkbox" id="ltSubtitleTypewriter" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div style="font-size: 10.5px; color: var(--text-muted); line-height: 1.45;">
+        💡 Finished lines scroll up and fade; the live line types itself out at speaking pace. Set lines to 1 for the old single-line overlay.
+      </div>
     </div>
 
     <!-- Main Controls -->
@@ -1153,15 +1272,77 @@
 
       <!-- History panel (toggleable) -->
       <div id="captionHistoryPanel" style="display:none; border-top: 1px solid var(--border);">
-        <div style="padding: 6px 12px; background: rgba(99,102,241,0.06); display: flex; align-items: center; justify-content: space-between;">
-          <span style="font-size: 11px; font-weight: 600; color: var(--primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 5px;">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            Subtitle History
-          </span>
-          <span id="historyCount" style="font-size: 10px; color: var(--text-muted);">0 lines</span>
+        <div style="padding: 6px 12px; background: rgba(99,102,241,0.06); display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+          <div style="display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0;">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <select id="historySessionSelect" style="background: transparent; color: var(--text); border: none; font-size: 11px; font-weight: 600; outline: none; cursor: pointer; max-width: 170px; padding: 0; font-family: var(--font);">
+              <option value="current" style="background: var(--surface); color: var(--text);">Active Session</option>
+            </select>
+          </div>
+          <span id="historyCount" style="font-size: 10px; color: var(--text-muted); flex-shrink: 0;">0 lines</span>
         </div>
         <div id="captionHistoryList" style="max-height: 280px; overflow-y: auto; padding: 8px 12px; font-size: 12px; line-height: 1.55;"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- TLDR Panel: read the whole video through Whisper first (same capture
+       pipeline as Live Captions), then boil the transcript's main points down
+       to one post. Provider/model/language live in Options → AI Providers. -->
+  <div class="panel" id="tldr-panel">
+    <div style="font-size: 12px; color: var(--text-dim); line-height: 1.55; margin-bottom: 12px;">
+      <strong style="color: var(--text);">Fastest:</strong> open the page with the video — an X post or most other sites — and press <strong style="color: var(--text);">Auto-read</strong>: the video file is fetched and transcribed hidden. No playback, done in seconds.<br>
+      <strong style="color: var(--text);">Fallback:</strong> for livestreams, YouTube, or players that hide the file, press <strong style="color: var(--text);">Read video</strong>, play the video to the end, then <strong style="color: var(--text);">TLDR video → Post</strong>.
+    </div>
+
+    <button class="btn btn-primary" id="tldrAutoReadBtn" style="width: 100%; display: flex; justify-content: center; gap: 8px; margin-bottom: 12px;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+      </svg>
+      <span id="tldrAutoReadBtnText">Auto-read &amp; TLDR (no playback)</span>
+    </button>
+
+    <button class="btn btn-ghost" id="tldrCaptureBtn" style="width: 100%; display: flex; justify-content: center; gap: 8px;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="22"/>
+      </svg>
+      <span id="tldrCaptureBtnText">Read video (Whisper)</span>
+    </button>
+    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--text-muted); margin: 6px 2px 12px;">
+      <span>
+        <span id="tldrCaptureDot" style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#64748b; margin-right:4px;"></span>
+        <span id="tldrCaptureState">Not reading</span>
+      </span>
+      <span id="tldrSessionInfo">0 lines captured</span>
+    </div>
+
+    <div class="select-wrap" style="margin-bottom: 12px;">
+      <select id="tldrSessionSelect">
+        <option value="current">Active Session (just captured)</option>
+      </select>
+    </div>
+
+    <button class="btn btn-ghost" id="tldrVideoBtn" style="width: 100%; display: flex; justify-content: center; gap: 8px;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+      </svg>
+      <span id="tldrVideoBtnText">TLDR video → Post</span>
+    </button>
+
+    <div class="result" id="tldrResultArea" style="display: none; margin-top: 12px;">
+      <div class="result-header">
+        <span class="result-label">TLDR Post</span>
+        <button class="icon-action" id="copyTldrPost" title="Copy post">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+        </button>
+      </div>
+      <div class="result-body" id="tldrResultBody" style="font-size: 13px; line-height: 1.5; color: var(--text); white-space: pre-wrap;"></div>
+      <div id="tldrResultMeta" style="padding: 4px 12px 8px; font-size: 10px; color: var(--text-muted);"></div>
     </div>
   </div>
 

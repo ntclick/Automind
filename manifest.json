@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoMind - AI Reply for X",
-  "version": "2.1.2",
+  "version": "2.4.6",
   "description": "AutoMind: Smart AI replies for X.com posts. Multi-language support with built-in translation. 50 free uses per day.",
 
   "icons": {
@@ -18,7 +18,9 @@
     "scripting",
     "sidePanel",
     "offscreen",
-    "tts"
+    "tts",
+    "alarms",
+    "tabs"
   ],
 
   "host_permissions": [
@@ -35,7 +37,14 @@
     "https://integrate.api.nvidia.com/*",
     "https://automind-proxy.dev102vn.workers.dev/*",
     "https://translate.googleapis.com/*",
-    "https://api.groq.com/*"
+    "https://api.groq.com/*",
+    "https://video.twimg.com/*",
+    "https://cdn.syndication.twimg.com/*"
+  ],
+
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
 
   "side_panel": {
@@ -99,16 +108,19 @@
         "shared/humanization-advanced.js"
       ],
       "matches": [
-        "<all_urls>"
+        "https://twitter.com/*",
+        "https://x.com/*",
+        "https://*.twitter.com/*",
+        "https://*.x.com/*"
       ]
     }
   ],
 
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.moonshot.cn https://api.moonshot.ai https://api.deepseek.com https://integrate.api.nvidia.com https://automind-proxy.dev102vn.workers.dev https://translate.googleapis.com https://api.groq.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: https:;"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: https:;"
   },
 
-  "minimum_chrome_version": "88",
+  "minimum_chrome_version": "120",
 
   "offline_enabled": false
 }

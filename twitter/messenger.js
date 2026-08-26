@@ -143,7 +143,12 @@ class ExtensionMessenger {
                 sessionId: postData.sessionId || 'session_' + Date.now(),
                 userId: postData.userId || 'user_' + Date.now(),
                 timestamp: Date.now(),
-                detectedLanguage: detectedLang
+                detectedLanguage: detectedLang,
+                isReply: !!postData.isReply,
+                originalPost: postData.originalPost || null,
+                replyTo: postData.replyTo || null,
+                imageUrl: postData.imageUrl || null,
+                videoUrl: postData.videoUrl || null
             };
             
             console.log('🔍 DEBUG: Request data prepared:', {
@@ -228,6 +233,10 @@ class ExtensionMessenger {
                     data: humanizedReplies,
                     language: detectedLang,
                     provider: response.apiProvider,
+                    // Carry the "these are canned strings, not AI output" flag
+                    // through to the UI so failures stop looking like successes.
+                    usedFallback: !!response.usedFallback,
+                    fallbackReason: response.fallbackReason || '',
                     originalData: response.data
                 };
 
