@@ -1,6 +1,8 @@
 let mediaRecorder = null;
 let recorders = [null, null];
 let currentRecorderIndex = 0;
+// Wall-clock run length of each recorder's current segment, stamped at swap time.
+let recorderDurations = [0, 0];
 let activeIntervalId = null;
 let audioStream = null;
 let audioCtx = null;
@@ -227,6 +229,12 @@ async function startCapture(streamId, config) {
       hasSoundInSegment = false; // Reset immediately for next segment
       soundFrameCount = 0;
       const blob = event.data;
+      // How much wall-clock audio this blob actually covers. Nothing downstream
+      // knew this, so the overlay had to guess a caption's on-screen time from
+      // its character count alone — the one number that has no relation to how
+      // long the speaker took to say it.
+      const durationMs = recorderDurations[index] || 0;
+      recorderDurations[index] = 0;
 
       const avgRms = rmsCount > 0 ? sumRmsInSegment / rmsCount : 0;
       const maxRms = maxRmsInSegment;
@@ -243,7 +251,7 @@ async function startCapture(streamId, config) {
         return;
       }
 
-      await processAudioBlob(blob, config, hasSound, maxRms, avgRms);
+      await processAudioBlob(blob, config, hasSound, maxRms, avgRms, durationMs);
     }
   };
 
@@ -252,7 +260,11 @@ async function startCapture(streamId, config) {
 
   const swapRecorders = () => {
     const nextIndex = 1 - currentRecorderIndex;
-    console.log(`🎙️ [Offscreen] Swapping recorders: ${currentRecorderIndex} -> ${nextIndex} (Elapsed: ${Date.now() - currentRecorderStartTime}ms)`);
+    const elapsed = Date.now() - currentRecorderStartTime;
+    console.log(`🎙️ [Offscreen] Swapping recorders: ${currentRecorderIndex} -> ${nextIndex} (Elapsed: ${elapsed}ms)`);
+    // Stamp the outgoing recorder's run length so handleRecorderData, which fires
+    // asynchronously once stop() flushes the blob, can report it.
+    recorderDurations[currentRecorderIndex] = elapsed;
 
     try {
       // 1. Verify and start/resume the next recorder first to maintain continuous gapless capture
@@ -359,9 +371,9 @@ async function startCapture(streamId, config) {
   }
 }
 
-async function processAudioBlob(blob, config, hasSound, maxRms, avgRms) {
+async function processAudioBlob(blob, config, hasSound, maxRms, avgRms, durationMs) {
   const currentSeq = chunkSeq++;
-  console.log(`🎙️ [Offscreen] Segment ${currentSeq} confirmed — sending to background.`);
+  console.log(`🎙️ [Offscreen] Segment ${currentSeq} confirmed (${durationMs}ms) — sending to background.`);
 
   const reader = new FileReader();
   reader.onloadend = () => {
@@ -373,7 +385,8 @@ async function processAudioBlob(blob, config, hasSound, maxRms, avgRms) {
       seq: currentSeq,
       hasSound: hasSound,
       maxRms: maxRms,
-      avgRms: avgRms
+      avgRms: avgRms,
+      durationMs: durationMs
     }).catch((e) => console.error('🎙️ [Offscreen] Failed to send process_audio:', e));
   };
   reader.readAsDataURL(blob);

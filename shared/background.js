@@ -640,7 +640,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'lt_process_audio') {
     (async () => {
       try {
-        const { audioBase64, config, seq, hasSound, maxRms, avgRms } = request;
+        const { audioBase64, config, seq, hasSound, maxRms, avgRms, durationMs } = request;
         if (!audioBase64) {
           sendResponse({ success: true, empty: true });
           return;
@@ -670,7 +670,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
 
         // Start transcription in parallel immediately!
-        transcribeAudioSegmentConcurrently(audioBase64, config, seq !== undefined ? seq : 0, session, tabId, hasSound, maxRms, avgRms);
+        transcribeAudioSegmentConcurrently(audioBase64, config, seq !== undefined ? seq : 0, session, tabId, hasSound, maxRms, avgRms, durationMs);
 
         sendResponse({ success: true });
       } catch (err) {
@@ -2831,7 +2831,10 @@ function isReasoningModel(model) {
 const REASONING_TOKEN_BUDGET = 4096;
 
 async function translateText(request) {
-  const { text, from = 'Vietnamese', to = 'English', bypassPrompt = false, temperature } = request;
+  // proxyTimeoutMs: the live-subtitle path needs a tight deadline because its
+  // calls are serialised on a per-session chain — one hung request stalls every
+  // sentence behind it. Offline/manual translation keeps the roomier default.
+  const { text, from = 'Vietnamese', to = 'English', bypassPrompt = false, temperature, proxyTimeoutMs } = request;
   if (!text || !text.trim()) return { success: false, error: 'No text provided' };
 
   // Route translation to its dedicated provider/model if configured
@@ -2901,7 +2904,7 @@ ${text}`;
         // Omitted on purpose for reasoning models: they only accept the default.
         if (!reasoning) payload.temperature = temp;
       }
-      const result = await self.PROXY_CLIENT.call(provider, model, payload);
+      const result = await self.PROXY_CLIENT.call(provider, model, payload, proxyTimeoutMs || 30000);
       const data = result.data;
       let translated = '';
       if (provider === 'claude')      translated = data.content?.[0]?.text || '';
@@ -4155,7 +4158,7 @@ function isStrongSpeech(maxRms) {
   return typeof maxRms === 'number' && maxRms >= RMS_MIN_THRESHOLD * RMS_STRONG_SPEECH_MULTIPLIER;
 }
 
-async function transcribeAudioSegmentConcurrently(audioBase64, config, seq, session, tabId, hasSound, maxRms, avgRms) {
+async function transcribeAudioSegmentConcurrently(audioBase64, config, seq, session, tabId, hasSound, maxRms, avgRms, durationMs) {
   const { sourceLang, targetLang, apiKey, ltEngine } = config;
   const activeTopic = _cachedTopic;
 
@@ -4175,6 +4178,7 @@ async function transcribeAudioSegmentConcurrently(audioBase64, config, seq, sess
       skipped: true,
       maxRms: rmsScore,
       avgRms: avgRms !== undefined ? avgRms : 0,
+      audioMs: durationMs || 0,
       hasSound: hasSound,
       asrEngine: 'skipped',
       asrModel: 'skipped',
@@ -4250,6 +4254,7 @@ async function transcribeAudioSegmentConcurrently(audioBase64, config, seq, sess
       error: errorMsg,
       maxRms: rmsScore,
       avgRms: avgRms !== undefined ? avgRms : 0,
+      audioMs: durationMs || 0,
       hasSound: hasSound,
       asrEngine: asrEngine,
       asrModel: modelUsed,
@@ -4388,6 +4393,13 @@ async function _drainReadyTranscriptions(session, config, tabId) {
 
     console.log(`🎙️ [BG] ASR #${seq} (${duration}ms, ASR: ${asrEngine}/${asrModel}) | Sound: ${hasSoundVal} | RMS: ${maxRmsVal.toFixed(4)}/${avgRmsVal.toFixed(4)} | Text: "${transcribedText.trim()}" -> "${cleanedText.trim()}"`);
 
+    // Accumulate how much real audio the sentence being assembled covers. A
+    // sentence spans 1-3 chunks, and this total is what lets the overlay hold a
+    // caption for as long as it was actually spoken instead of guessing from
+    // character count.
+    const chunkAudioMs = chunkObj && typeof chunkObj === 'object' ? (chunkObj.audioMs || 0) : 0;
+    session.audioMs = (session.audioMs || 0) + chunkAudioMs;
+
     if (!cleanedText || !cleanedText.trim()) continue;
 
     // Save clean segment context (excluding hallucinations, skipped, empty, and low RMS)
@@ -4514,10 +4526,14 @@ async function _drainReadyTranscriptions(session, config, tabId) {
 async function finalizeAndTranslateSentence(session, sourceLang, targetLang, ltEngine, activeTopic = 'general') {
   const fullTextToTranslate = session.chunks.join(' ');
   const activeSegmentId = session.segmentId;
+  // Claim the accumulated audio length for THIS sentence before resetting, so a
+  // chunk arriving during translation counts toward the next one.
+  const sentenceAudioMs = session.audioMs || 0;
 
   // Reset rolling state for next sentence
   session.chunks = [];
   session.lastText = '';
+  session.audioMs = 0;
   session.segmentId = 'seg_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
   delete session.sentenceStartTime;
   delete session.segmentCount;
@@ -4658,6 +4674,7 @@ async function finalizeAndTranslateSentence(session, sourceLang, targetLang, ltE
         segmentId: activeSegmentId,
         sequenceNumber: session.subtitleSeq,
         targetLang: targetLang,
+        durationMs: sentenceAudioMs,
         isUpdate: false
       });
 
@@ -5112,14 +5129,14 @@ async function translateLiveWithAI({ text, from, to, context, topic }) {
     // Subtitles are speech, not a document. A little headroom above 0 is what
     // lets the model reach for the natural phrasing instead of the word-for-word
     // one; still low enough that numbers and terms stay faithful.
-    let res = await translateText({ text: prompt, bypassPrompt: true, from: 'English', to: to, temperature: 0.5 });
+    let res = await translateText({ text: prompt, bypassPrompt: true, from: 'English', to: to, temperature: 0.5, proxyTimeoutMs: 8000 });
 
     // An empty completion is usually a one-off (a truncated reasoning pass, a
     // dropped stream). Retrying once is far cheaper than dumping the whole line
     // to Google Translate, which is what the user actually notices.
     if ((!res || !res.success) && /empty translation/i.test(res?.error || '')) {
       console.warn('⚠️ [BG] Empty translation returned. Retrying once before falling back.');
-      res = await translateText({ text: prompt, bypassPrompt: true, from: 'English', to: to, temperature: 0.5 });
+      res = await translateText({ text: prompt, bypassPrompt: true, from: 'English', to: to, temperature: 0.5, proxyTimeoutMs: 8000 });
     }
     if (res && res.success && res.translated) {
       const cleanOriginalMatch = res.translated.match(/CLEAN_ORIGINAL:\s*([\s\S]*?)(?=\nTRANSLATION:|$)/i);
@@ -6950,10 +6967,37 @@ async function _processNextTTS() {
         _processNextTTS();
       }, guardMs);
 
+      // Tell the overlay when this line actually starts and stops being spoken.
+      // This is the sync channel: the display had no way to know, so it paced
+      // captions off character count while the readout paced off the voice engine,
+      // and the two drifted apart. Only start/end — many engines (Google's network
+      // voices among them) never emit word/charIndex, so anything finer would work
+      // on some machines and silently not on others.
+      const notifySync = (phase) => {
+        if (isStale() && phase !== 'end') return;
+        try {
+          if (activeTabId) {
+            chrome.tabs.sendMessage(activeTabId, {
+              action: 'lt_tts_sync',
+              phase,
+              sequenceNumber: currentTask.sequenceNumber,
+              chars: speakText.length,
+              rate,
+              ts: Date.now()
+            }).catch(() => {});
+          }
+        } catch (_) {}
+      };
+
       const options = {
         rate: rate,
         onEvent: (event) => {
+          if (event.type === 'start') {
+            notifySync('start');
+            return;
+          }
           if (event.type === 'end' || event.type === 'interrupted' || event.type === 'cancelled' || event.type === 'error') {
+            notifySync('end');
             release();
           }
         }

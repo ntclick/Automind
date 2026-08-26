@@ -3682,7 +3682,10 @@ const contentScriptMessageListener = (request, sender, sendResponse) => {
         LiveTranslator.stop();
         sendResponse({ success: true });
     } else if (request.action === 'lt_subtitle') {
-        LiveTranslator.showSubtitle(request.original, request.translated, request.sequenceNumber, request.targetLang);
+        LiveTranslator.showSubtitle(request.original, request.translated, request.sequenceNumber, request.targetLang, request.durationMs);
+        sendResponse({ success: true });
+    } else if (request.action === 'lt_tts_sync') {
+        LiveTranslator.onTtsSync(request);
         sendResponse({ success: true });
     } else if (request.action === 'lt_processing') {
         LiveTranslator.showProcessing();
@@ -4169,6 +4172,17 @@ const LiveTranslator = {
   _typeTarget: null,
   _style: 'netflix',
 
+  // TTS sync state. The background reports when each line starts and stops being
+  // spoken; _ttsCpsEma is this machine's measured voice speed, learned from those
+  // reports, and is what lets the reveal run at the pace the line is being read.
+  _advanceTimer: null,
+  _awaitingTtsSeq: null,
+  _lastTtsSyncAt: 0,
+  _ttsStartedAt: 0,
+  _ttsChars: 0,
+  _ttsCpsEma: 0,
+  _lastEndedTtsSeq: -1,
+
   _preset() {
     return SUBTITLE_STYLES[this._style] || SUBTITLE_STYLES.netflix;
   },
@@ -4230,17 +4244,19 @@ const LiveTranslator = {
    * the queue grows beyond 4, so the user never sees content that is too far
    * behind the live audio.
    */
-  _enqueueSubtitle(original, translated) {
-    this._subtitleQueue.push({ original, translated });
-    // Backpressure is handled primarily by SHORTENING hold times (see
-    // _playNextSubtitle) instead of silently dropping content. Dropping only
-    // kicks in as a last resort when severely backed up (>6 items).
-    if (this._subtitleQueue.length > 6) {
-      const dropped = this._subtitleQueue.length - 4;
+  _enqueueSubtitle(original, translated, seq, durationMs) {
+    this._subtitleQueue.push({ original, translated, seq, durationMs });
+    // Backpressure must match the TTS queue's policy in background.js exactly
+    // (drop above 8, keep head + last 4). They used to differ — drop above 6
+    // keeping head + last 3 here — so under load the two sides discarded
+    // DIFFERENT lines and the voice read sentences that never appeared on screen
+    // while the screen showed sentences that were never read.
+    if (this._subtitleQueue.length > 8) {
+      const dropped = this._subtitleQueue.length - 5;
       console.warn(`🎙️ [Content] Subtitle queue critical: dropping ${dropped} middle item(s).`);
       this._subtitleQueue = [
         this._subtitleQueue[0],
-        ...this._subtitleQueue.slice(-3)
+        ...this._subtitleQueue.slice(-4)
       ];
     }
     if (!this._subtitleDisplaying) this._playNextSubtitle();
@@ -4248,28 +4264,134 @@ const LiveTranslator = {
 
   /** Dequeue and render the next subtitle, scheduling the one after it. */
   _playNextSubtitle() {
+    this._clearAdvanceTimer();
     if (this._subtitleQueue.length === 0) {
       this._subtitleDisplaying = false;
+      this._awaitingTtsSeq = null;
       return;
     }
     this._subtitleDisplaying = true;
     const item = this._subtitleQueue.shift();
-    let holdMs = this._estimateReadMs(item.translated || item.original || '', this.targetLang);
+    const text = item.translated || item.original || '';
+
+    // Hold this line for as long as it was actually SPOKEN, when we know that.
+    // Character count says nothing about how long the speaker took, so a caption
+    // covering 9s of audio and one covering 1.5s used to be held for the same
+    // time and the display walked away from the audio.
+    let holdMs = this._estimateReadMs(text, this.targetLang);
+    if (item.durationMs > 0) {
+      const readMs = holdMs;
+      holdMs = Math.max(item.durationMs, Math.min(readMs, item.durationMs * 1.3));
+      holdMs = Math.min(holdMs, 12000);
+    }
+
     // Catch-up pacing: when lines are queuing behind this one, shorten the hold
     // so display drains toward real-time instead of drifting further behind.
     const backlog = this._subtitleQueue.length;
     if (backlog >= 3) holdMs = Math.min(holdMs, 700);
     else if (backlog >= 1) holdMs = Math.min(holdMs, 1200);
-    // holdMs is resolved first so the reveal can size itself to the time it has.
-    this._renderSubtitle(item.original, item.translated, holdMs);
-    setTimeout(() => this._playNextSubtitle(), holdMs);
+
+    // The reveal is sized from how long the VOICE will take when TTS is driving,
+    // and from the hold otherwise. _renderSubtitle passes this through to _typeInto.
+    const revealMs = this._revealBudgetFor(text, holdMs);
+    this._renderSubtitle(item.original, item.translated, holdMs, revealMs);
+
+    // Single owner for advancing the queue. When TTS is speaking this line, the
+    // engine's own 'end' event advances it and this timer is only a backstop;
+    // otherwise the timer is the mechanism.
+    // Only wait on the voice if this line has not already been spoken. The
+    // background speaks on its own schedule, so when the display is behind, the
+    // 'end' for this seq may already have gone past — waiting for it would hang
+    // the line until the fallback cap expired.
+    const alreadySpoken = item.seq !== undefined && item.seq <= this._lastEndedTtsSeq;
+    if (this._ttsSyncLive() && item.seq !== undefined && !alreadySpoken && backlog < 3) {
+      this._awaitingTtsSeq = item.seq;
+      const cap = Math.max(holdMs, Math.min(12000, (item.durationMs || holdMs) * 2.5));
+      this._advanceTimer = setTimeout(() => {
+        console.log('🎙️ [Content] TTS end never arrived — advancing on fallback timer.');
+        this._awaitingTtsSeq = null;
+        this._playNextSubtitle();
+      }, cap);
+    } else {
+      this._awaitingTtsSeq = null;
+      this._advanceTimer = setTimeout(() => this._playNextSubtitle(), holdMs);
+    }
+  },
+
+  _clearAdvanceTimer() {
+    if (this._advanceTimer) {
+      clearTimeout(this._advanceTimer);
+      this._advanceTimer = null;
+    }
+  },
+
+  /** True while the background is actively reporting TTS progress. */
+  _ttsSyncLive() {
+    return this._lastTtsSyncAt > 0 && (Date.now() - this._lastTtsSyncAt) < 15000;
+  },
+
+  /**
+   * How long the reveal should take. With TTS on we know the voice's measured
+   * speed from previous lines, so the text can appear at the pace it is being
+   * read; chrome.tts cannot report an utterance's duration up front, so the
+   * first line after a silence is still an estimate.
+   */
+  _revealBudgetFor(text, holdMs) {
+    if (this._ttsSyncLive() && this._ttsCpsEma > 0 && text) {
+      const spokenMs = (text.length / this._ttsCpsEma) * 1000;
+      return Math.max(250, Math.min(spokenMs * 0.9, 10000));
+    }
+    return holdMs * 0.6;
+  },
+
+  /**
+   * Background reports that a line started or finished being spoken.
+   * 'end' is the ground truth that advances the queue and calibrates the reveal.
+   */
+  onTtsSync(msg) {
+    if (!msg) return;
+    this._lastTtsSyncAt = Date.now();
+
+    if (msg.phase === 'start') {
+      this._ttsStartedAt = Date.now();
+      this._ttsChars = msg.chars || 0;
+      return;
+    }
+
+    if (msg.phase === 'end') {
+      // Measure this utterance's real chars-per-second and fold it into a
+      // rolling average, so the next line's reveal is sized from the voice
+      // actually installed on this machine rather than a hard-coded table.
+      if (this._ttsStartedAt && this._ttsChars > 0) {
+        const elapsed = Date.now() - this._ttsStartedAt;
+        if (elapsed > 300 && elapsed < 60000) {
+          const cps = this._ttsChars / (elapsed / 1000);
+          if (cps > 2 && cps < 80) {
+            this._ttsCpsEma = this._ttsCpsEma > 0
+              ? this._ttsCpsEma * 0.7 + cps * 0.3
+              : cps;
+          }
+        }
+      }
+      this._ttsStartedAt = 0;
+      this._ttsChars = 0;
+      if (typeof msg.sequenceNumber === 'number' && msg.sequenceNumber > this._lastEndedTtsSeq) {
+        this._lastEndedTtsSeq = msg.sequenceNumber;
+      }
+
+      if (this._awaitingTtsSeq !== null && this._awaitingTtsSeq !== undefined &&
+          msg.sequenceNumber === this._awaitingTtsSeq) {
+        this._awaitingTtsSeq = null;
+        this._playNextSubtitle();
+      }
+    }
   },
 
   /**
    * Write subtitle content to the DOM overlay.
    * Extracted from showSubtitle() so the queue runner can call it independently.
    */
-  _renderSubtitle(original, translated, holdMs) {
+  _renderSubtitle(original, translated, holdMs, revealMs) {
     this.createOverlay();
     if (!translated || !translated.trim()) return;
 
@@ -4296,7 +4418,7 @@ const LiveTranslator = {
     // Trim before typing so the reveal happens on a line that is already in
     // its final position and opacity.
     this._trimFeed();
-    this._typeInto(transEl, text, holdMs);
+    this._typeInto(transEl, text, revealMs !== undefined ? revealMs : holdMs * 0.6);
     if (this.dimTimeout) clearTimeout(this.dimTimeout);
     this.dimTimeout = null;
     // The `!this.isListening` guard is always true in tab-capture mode (nothing
@@ -4441,15 +4563,15 @@ const LiveTranslator = {
   },
 
   /**
-   * Reveal text at roughly speaking pace. The budget is a fraction of the line's
-   * hold time so the sentence is always complete and readable before the next
-   * one lands — a reveal still running when the line is replaced is worse than
-   * no reveal at all.
+   * Reveal text at speaking pace over `budgetMs`, which the caller sizes from the
+   * measured TTS speed when narration is on and from the line's hold time
+   * otherwise. Either way the reveal must finish before the line is replaced — a
+   * reveal still running when that happens is worse than no reveal at all.
    */
-  _typeInto(el, text, holdMs) {
+  _typeInto(el, text, budgetMs) {
     this._flushReveal();
 
-    const budget = Math.max(0, (holdMs || 0) * 0.6);
+    const budget = Math.max(0, budgetMs || 0);
     // Above ~90 chars/sec the reveal is a blur, not a reveal, and the reader is
     // better served by the whole line sitting still for the time available. This
     // is the catch-up case: holdMs collapses to 700ms when lines are queuing.
@@ -4577,7 +4699,7 @@ const LiveTranslator = {
     }, 10000);
   },
 
-  showSubtitle(original, translated, sequenceNumber, targetLang) {
+  showSubtitle(original, translated, sequenceNumber, targetLang, durationMs) {
     // The overlay never learned the target language: lt_start has no sender
     // anywhere in the extension, so targetLang stayed at its 'vi' default and the
     // per-script reading speeds in _estimateReadMs ({zh:8, ja:8, ko:10, th:10})
@@ -4639,7 +4761,11 @@ const LiveTranslator = {
 
     // ── Final translated subtitle — route through the read-paced queue ──────
     if (!translated || !translated.trim()) return;
-    this._enqueueSubtitle(original, translated);
+    // seq and durationMs must reach the queue: the queue is what schedules the
+    // line, so anything that stops here cannot influence pacing. sequenceNumber
+    // used to be discarded at exactly this boundary, which is why the background
+    // was already carrying it on every TTS task and nothing could ever use it.
+    this._enqueueSubtitle(original, translated, sequenceNumber, durationMs);
   },
 
   start(sourceLang, targetLang) {
@@ -4663,6 +4789,14 @@ const LiveTranslator = {
     // Flush subtitle queue immediately on stop to prevent stale content
     this._subtitleQueue = [];
     this._subtitleDisplaying = false;
+    // The queue's own advance timer used to be an unheld setTimeout, so a pending
+    // tick survived stop() and re-entered the drain against a cleared queue.
+    this._clearAdvanceTimer();
+    this._awaitingTtsSeq = null;
+    this._lastTtsSyncAt = 0;
+    this._ttsStartedAt = 0;
+    this._ttsChars = 0;
+    this._lastEndedTtsSeq = -1;
     this._clearFeed();
     if (this.silenceTimeout) {
       clearTimeout(this.silenceTimeout);

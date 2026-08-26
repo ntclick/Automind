@@ -13,19 +13,35 @@ self.PROXY_CLIENT = {
   },
 
   // POST { provider, model, payload } to /proxy
-  async call(provider, model, payload) {
+  // timeoutMs: live translation must have a deadline — a hung request here used
+  // to block the whole per-session translation chain, which also latches the
+  // interim flag, so the overlay went blank until the socket eventually died.
+  async call(provider, model, payload, timeoutMs = 30000) {
     const proxyUrl = (self.ADMIN_DEFAULTS && self.ADMIN_DEFAULTS.proxyUrl) || 'https://automind-proxy.dev102vn.workers.dev';
     if (!proxyUrl) throw new Error('Proxy URL not configured');
 
     const installId = await this.getInstallId();
-    const res = await fetch(`${proxyUrl}/proxy`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Install-Id': installId
-      },
-      body: JSON.stringify({ provider, model, payload })
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(`${proxyUrl}/proxy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Install-Id': installId
+        },
+        body: JSON.stringify({ provider, model, payload }),
+        signal: controller.signal
+      });
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new Error(`Proxy request timed out after ${timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     const json = await res.json().catch(() => ({}));
     if (!res.ok) {
