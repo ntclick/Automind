@@ -9,9 +9,15 @@ let audioCtx = null;
 let intervalId = null;
 let webSpeechRec = null;
 let chunkSeq = 0;
-let maxRmsInSegment = 0;
-let sumRmsInSegment = 0;
-let rmsCount = 0;
+// Loudness stats, per recorder. These used to be single shared values reset
+// inside ondataavailable, which fires asynchronously AFTER the swap has already
+// started the next recorder — so frames belonging to the new segment were folded
+// into the old segment's numbers and then zeroed along with them. The new
+// segment lost its opening frames, which is exactly when a short utterance needs
+// them to clear the VAD threshold.
+let maxRmsInSegment = [0, 0];
+let sumRmsInSegment = [0, 0];
+let rmsCount = [0, 0];
 
 let currentRecorderStartTime = 0;
 let silenceFrameCount = 0;
@@ -75,6 +81,10 @@ function resolvePlaybackGain(isMuted, isTtsEnabled, originalAudioMode) {
 async function startCapture(streamId, config) {
   stopCapture(); // Ensure previous capture is fully cleaned up
   chunkSeq = 0;
+  maxRmsInSegment = [0, 0];
+  sumRmsInSegment = [0, 0];
+  rmsCount = [0, 0];
+  recorderDurations = [0, 0];
 
   console.log('🎙️ [Offscreen] Beginning parallel setup with streamId:', streamId);
 
@@ -206,7 +216,12 @@ async function startCapture(streamId, config) {
   // the compressor's makeup gain makes perfectly audible, causing false skips.
   captureGain.connect(analyser);
 
-  let hasSoundInSegment = false;
+  // Per recorder, for the same reason as the RMS accumulators above.
+  let hasSoundInSegment = [false, false];
+  // NOT per recorder, and deliberately not reset at a swap: this is the running
+  // count toward VAD_MIN_FRAMES, and speech does not stop just because the
+  // recorders changed over. Carrying it means a segment that begins mid-sentence
+  // registers as speech immediately instead of having to re-earn three frames.
   let soundFrameCount = 0;
 
   // ─── Dual alternating MediaRecorders for valid WebM chunk containers ───
@@ -225,9 +240,8 @@ async function startCapture(streamId, config) {
 
   const handleRecorderData = async (event, index) => {
     if (event.data && event.data.size > 0) {
-      const hasSound = hasSoundInSegment;
-      hasSoundInSegment = false; // Reset immediately for next segment
-      soundFrameCount = 0;
+      const hasSound = hasSoundInSegment[index];
+      hasSoundInSegment[index] = false; // Reset THIS slot only
       const blob = event.data;
       // How much wall-clock audio this blob actually covers. Nothing downstream
       // knew this, so the overlay had to guess a caption's on-screen time from
@@ -236,13 +250,13 @@ async function startCapture(streamId, config) {
       const durationMs = recorderDurations[index] || 0;
       recorderDurations[index] = 0;
 
-      const avgRms = rmsCount > 0 ? sumRmsInSegment / rmsCount : 0;
-      const maxRms = maxRmsInSegment;
-
-      // Reset volume metrics for the next segment
-      maxRmsInSegment = 0;
-      sumRmsInSegment = 0;
-      rmsCount = 0;
+      // Read and clear THIS recorder's slot only. The other slot is already
+      // accumulating for the segment now in progress and must not be touched.
+      const avgRms = rmsCount[index] > 0 ? sumRmsInSegment[index] / rmsCount[index] : 0;
+      const maxRms = maxRmsInSegment[index];
+      maxRmsInSegment[index] = 0;
+      sumRmsInSegment[index] = 0;
+      rmsCount[index] = 0;
 
       console.log(`🎙️ [Offscreen] Recorder ${index} WebM blob emitted. Size: ${blob.size} bytes. VAD sound: ${hasSound} | Max RMS: ${maxRms.toFixed(5)} | Avg RMS: ${avgRms.toFixed(5)}`);
 
@@ -313,17 +327,20 @@ async function startCapture(streamId, config) {
     }
     const rms = Math.sqrt(sum / vadBuffer.length);
 
-    if (rms > maxRmsInSegment) {
-      maxRmsInSegment = rms;
+    // swapRecorders advances currentRecorderIndex before it stops the outgoing
+    // recorder, so from the swap onward these land in the incoming segment's slot.
+    const slot = currentRecorderIndex;
+    if (rms > maxRmsInSegment[slot]) {
+      maxRmsInSegment[slot] = rms;
     }
-    sumRmsInSegment += rms;
-    rmsCount++;
+    sumRmsInSegment[slot] += rms;
+    rmsCount[slot]++;
 
     if (rms > VAD_THRESHOLD) {
       soundFrameCount++;
       silenceFrameCount = 0; // Reset silence frames when there is sound
       if (soundFrameCount >= VAD_MIN_FRAMES) {
-        hasSoundInSegment = true; // Only flag real speech after sustained signal
+        hasSoundInSegment[slot] = true; // Only flag real speech after sustained signal
       }
     } else {
       // Leaky integrator, not a hard reset. Speech is not continuously above

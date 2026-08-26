@@ -3682,10 +3682,13 @@ const contentScriptMessageListener = (request, sender, sendResponse) => {
         LiveTranslator.stop();
         sendResponse({ success: true });
     } else if (request.action === 'lt_subtitle') {
-        LiveTranslator.showSubtitle(request.original, request.translated, request.sequenceNumber, request.targetLang, request.durationMs);
+        LiveTranslator.showSubtitle(request.original, request.translated, request.sequenceNumber, request.targetLang, request.durationMs, request.hasStrongSpeech);
         sendResponse({ success: true });
     } else if (request.action === 'lt_tts_sync') {
         LiveTranslator.onTtsSync(request);
+        sendResponse({ success: true });
+    } else if (request.action === 'lt_degraded') {
+        LiveTranslator.showDegraded(request.message);
         sendResponse({ success: true });
     } else if (request.action === 'lt_processing') {
         LiveTranslator.showProcessing();
@@ -3704,27 +3707,11 @@ chrome.runtime.onMessage.addListener(contentScriptMessageListener);
 // 🎙️ LIVE TRANSLATOR: Speech Recognition & Overlay
 // ==========================================
 
-let localMovieMode = false;
-try {
-  chrome.storage.local.get(['ltMovieMode'], (res) => {
-    if (res && res.ltMovieMode !== undefined) {
-      localMovieMode = !!res.ltMovieMode;
-    }
-  });
-} catch (e) {
-  console.warn('Failed to get ltMovieMode in content script:', e);
-}
-
-try {
-  chrome.storage.onChanged.addListener((changes, namespace) => {
-    if (changes.ltMovieMode) {
-      localMovieMode = !!changes.ltMovieMode.newValue;
-      console.log('🎬 [Content] Movie Mode updated to:', localMovieMode);
-    }
-  });
-} catch (e) {
-  console.warn('Failed to add storage listener in content script:', e);
-}
+// The old `ltMovieMode` toggle that used to relax this filter is gone — nothing
+// has written that key since it was removed, so the lenient branch below was
+// unreachable and every line got the strict rules. The background makes the same
+// judgement per segment now, from actual speech energy, and reports it on the
+// subtitle as hasStrongSpeech; that is what relaxes the filter here.
 
 function isRepetitiveLoop(text) {
   if (!text || typeof text !== 'string') return false;
@@ -3788,7 +3775,15 @@ function isRepetitiveLoop(text) {
   return false;
 }
 
-function isWhisperHallucination(text) {
+/**
+ * @param {string} text
+ * @param {boolean} hasStrongSpeech  The segment carried clear speech energy, so
+ *   the words that are usually Whisper's silence filler ("thank you", "cảm ơn")
+ *   are real dialogue here. Mirrors the same parameter in background.js — without
+ *   it this function defaulted to strict and re-dropped lines the background had
+ *   deliberately passed, and it is the ONLY place the translated string is checked.
+ */
+function isWhisperHallucination(text, hasStrongSpeech = false) {
   if (!text || typeof text !== 'string') return true;
   if (isRepetitiveLoop(text)) return true;
 
@@ -4016,7 +4011,7 @@ function isWhisperHallucination(text) {
     'otter'
   ];
 
-  if (localMovieMode) {
+  if (hasStrongSpeech) {
     const conversationalTerms = new Set([
       'thank you very much', 'thanks very much', 'thank you', 'thanks', 'goodbye', 'bye',
       'see you next time', 'see you soon', 'thank you so much', 'cảm ơn', 'cám ơn', 'cảm ơn bạn',
@@ -4042,7 +4037,7 @@ function isWhisperHallucination(text) {
   const words = clean.split(' ');
   const onlyFillers = words.every(w => fillers.has(w));
   if (onlyFillers) {
-    const maxFillerLength = localMovieMode ? 2 : 5;
+    const maxFillerLength = hasStrongSpeech ? 2 : 5;
     if (words.length < maxFillerLength) return true;
   }
 
@@ -4665,6 +4660,34 @@ const LiveTranslator = {
     // Intentionally no-op: keep the previous translation visible until the next final subtitle arrives.
   },
 
+  /**
+   * Quality has dropped (quota gone, AI failed, Google unreachable). Someone
+   * watching fullscreen had no way to know — lt_warning is only handled by the
+   * popup and side panel, both of which are hidden at that point.
+   *
+   * A small, static badge rather than a banner: the background latches these to
+   * one per kind per session, but the underlying condition can last all day, so
+   * this must never be something that repaints or demands dismissal.
+   */
+  showDegraded(message) {
+    if (!message) return;
+    this.createOverlay();
+    if (!this.overlay) return;
+
+    let badge = this.overlay.querySelector('.subtitle-degraded');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'subtitle-degraded';
+      badge.style.cssText =
+        'margin-bottom:6px;font-size:11px;letter-spacing:.02em;opacity:.72;' +
+        'font-weight:500;text-align:center;color:#ffd479;' +
+        'text-shadow:0 1px 2px rgba(0,0,0,.9);pointer-events:none;';
+      this.overlay.insertBefore(badge, this.overlay.firstChild);
+    }
+    badge.textContent = '· ' + message + ' ·';
+    console.warn('🎙️ [Content] Live translation degraded:', message);
+  },
+
   showError(error) {
     const message = typeof error === 'string'
       ? error
@@ -4699,7 +4722,7 @@ const LiveTranslator = {
     }, 10000);
   },
 
-  showSubtitle(original, translated, sequenceNumber, targetLang, durationMs) {
+  showSubtitle(original, translated, sequenceNumber, targetLang, durationMs, hasStrongSpeech) {
     // The overlay never learned the target language: lt_start has no sender
     // anywhere in the extension, so targetLang stayed at its 'vi' default and the
     // per-script reading speeds in _estimateReadMs ({zh:8, ja:8, ko:10, th:10})
@@ -4719,7 +4742,7 @@ const LiveTranslator = {
     }
 
     // Double check Whisper hallucination to protect display overlay
-    if (isWhisperHallucination(original) || isWhisperHallucination(translated)) {
+    if (isWhisperHallucination(original, hasStrongSpeech) || isWhisperHallucination(translated, hasStrongSpeech)) {
       console.log('🎙️ [Content] Filtered out Whisper hallucination overlay:', original, '->', translated);
       return;
     }
@@ -4797,6 +4820,9 @@ const LiveTranslator = {
     this._ttsStartedAt = 0;
     this._ttsChars = 0;
     this._lastEndedTtsSeq = -1;
+    // The degraded badge lives outside the feed, so _clearFeed() cannot remove it.
+    const badge = this.overlay && this.overlay.querySelector('.subtitle-degraded');
+    if (badge) badge.remove();
     this._clearFeed();
     if (this.silenceTimeout) {
       clearTimeout(this.silenceTimeout);

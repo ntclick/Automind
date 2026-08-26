@@ -583,14 +583,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           _currentSession = sessionObj;
           await chrome.storage.local.set({ _currentSession: sessionObj }).catch(() => {});
         }
-        if (self.ltSessions) {
-          for (const tid in self.ltSessions) {
-            if (self.ltSessions[tid]) {
-              self.ltSessions[tid].cleanAsrHistory = [];
-            }
-          }
-        }
-        console.log('🗑️ [BG] Active session captions and clean ASR history cleared by user.');
+        console.log('🗑️ [BG] Active session captions cleared by user.');
         sendResponse({ success: true });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
@@ -3825,6 +3818,8 @@ async function startTabCapture(tabId, streamId, config, trigger = 'unknown') {
   try {
     // Reset and clear any stale TTS state for the new session
     clearTtsState();
+    // A new session gets to be told about degradation again.
+    resetLtWarnLatch();
 
     // Initialize session history log
     let sessionObj = null;
@@ -3915,8 +3910,7 @@ async function startTabCapture(tabId, streamId, config, trigger = 'unknown') {
         nextExpectedSeq: 0,
         transcriptionBuffer: {},
         _gapSince: null,
-        _gapSeq: undefined,
-        cleanAsrHistory: []
+        _gapSeq: undefined
       };
       await saveLtSessions();
     }
@@ -4051,14 +4045,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // Automatically restore audio (unmute) when a previously captured/muted tab becomes active
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  // Reset cleanAsrHistory on tab switch/change
-  if (self.ltSessions) {
-    for (const tid in self.ltSessions) {
-      if (self.ltSessions[tid]) {
-        self.ltSessions[tid].cleanAsrHistory = [];
-      }
-    }
-  }
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     if (tab && tab.mutedInfo && tab.mutedInfo.muted && tab.mutedInfo.reason === 'extension') {
@@ -4113,6 +4099,33 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }, 1500); // 1.5s delay to guarantee standard page environment initializations
   }
 });
+
+// Which degradation notices this session has already sent. The warning sites
+// fire per SENTENCE with no throttle, and quota exhaustion lasts the rest of the
+// day, so an un-latched notice would repaint on every line forever — which is
+// precisely why the overlay was never given a warning handler in the first place.
+// Latch by kind: say it once, then stay quiet.
+let _ltWarnLatch = new Set();
+
+function resetLtWarnLatch() {
+  _ltWarnLatch = new Set();
+}
+
+// Tell the in-page overlay that output has degraded (quota gone, AI failed,
+// Google unreachable), at most once per kind per session.
+function notifyDegraded(kind, message) {
+  if (_ltWarnLatch.has(kind)) return;
+  _ltWarnLatch.add(kind);
+  try {
+    if (activeTabId) {
+      chrome.tabs.sendMessage(activeTabId, {
+        action: 'lt_degraded',
+        kind,
+        message
+      }).catch(() => {});
+    }
+  } catch (_) {}
+}
 
 // Broadcast a message to all active pages (content scripts and popup)
 function broadcastMessage(payload) {
@@ -4404,26 +4417,11 @@ async function _drainReadyTranscriptions(session, config, tabId) {
 
     // Save clean segment context (excluding hallucinations, skipped, empty, and low RMS)
     // Constraint: text length >= 12 chars and word count >= 3
-    const isCleanChunk = chunkObj && !chunkObj.skipped && chunkObj.success !== false;
-    const hasEnoughChars = cleanedText.trim().length >= 12;
-    const hasEnoughWords = cleanedText.trim().split(/\s+/).length >= 3;
-
-    if (isCleanChunk && hasEnoughChars && hasEnoughWords) {
-      if (!session.cleanAsrHistory) {
-        session.cleanAsrHistory = [];
-      }
-      session.cleanAsrHistory.push({
-        text: cleanedText.trim(),
-        seq: seq,
-        sourceLang: sourceLang,
-        topic: activeTopic,
-        timestamp: Date.now()
-      });
-      if (session.cleanAsrHistory.length > 5) {
-        session.cleanAsrHistory.shift();
-      }
-      console.log(`🎙️ [BG] Added segment ${seq} to cleanAsrHistory. Current size: ${session.cleanAsrHistory.length}`);
-    }
+    // (cleanAsrHistory was maintained here and never read by anything — a
+    // leftover of the Whisper prompt-chaining that was removed on purpose,
+    // because feeding the previous transcript back is a known amplifier of
+    // Whisper's repetition loops. Rolling context for TRANSLATION still exists,
+    // as session.history. Dropped the write, the field, and its four resets.)
 
     // 4. Boundary check and sentence accumulation
     session.lastTimestamp = Date.now();
@@ -4551,7 +4549,11 @@ async function finalizeAndTranslateSentence(session, sourceLang, targetLang, ltE
   // Double check Whisper hallucination on the finalized accumulated sentence.
   // The sentence was built from chunks that already passed the per-chunk gate,
   // so if any of them carried real speech, treat the whole line as dialogue.
-  if (isWhisperHallucination(fullTextToTranslate, !!session.lastStrongSpeech)) {
+  // Remember it before the reset: the content script re-runs this same filter on
+  // the TRANSLATED string, and without the signal it applies the strict rules and
+  // silently drops lines this gate deliberately let through.
+  const sentenceHadStrongSpeech = !!session.lastStrongSpeech;
+  if (isWhisperHallucination(fullTextToTranslate, sentenceHadStrongSpeech)) {
     console.log('🎙️ [BG] Finalized sentence filtered as Whisper hallucination:', fullTextToTranslate.trim());
     session.lastStrongSpeech = false;
     return;
@@ -4603,6 +4605,7 @@ async function finalizeAndTranslateSentence(session, sourceLang, targetLang, ltE
             action: 'lt_warning',
             error: 'Translation failed: Google Translate is unavailable. Showing original speech.'
           });
+          notifyDegraded('google-down', 'Google Translate không phản hồi — đang hiện lời gốc');
         }
         return result;
       };
@@ -4633,12 +4636,14 @@ async function finalizeAndTranslateSentence(session, sourceLang, targetLang, ltE
               action: 'lt_warning',
               error: `Free daily quota exhausted (${transRes.quota?.used ?? '?'}/${transRes.quota?.limit ?? 50} uses). Falling back to Google Translate. Add your own API key in Settings for unlimited use.`
             });
+            notifyDegraded('quota', 'Hết lượt AI miễn phí hôm nay — đang dùng Google Translate');
           } else {
             console.warn(`⚠️ [BG] ${engineLabel} translation failed, falling back to Google Translate:`, apiError);
             broadcastMessage({
               action: 'lt_warning',
               error: `AI Translation failed (${apiError}). Falling back to Google Translate.`
             });
+            notifyDegraded('ai-failed', 'Dịch AI lỗi — đang dùng Google Translate');
           }
           translatedText = await safeGoogleTranslate(fullTextToTranslate);
         }
@@ -4675,6 +4680,7 @@ async function finalizeAndTranslateSentence(session, sourceLang, targetLang, ltE
         sequenceNumber: session.subtitleSeq,
         targetLang: targetLang,
         durationMs: sentenceAudioMs,
+        hasStrongSpeech: sentenceHadStrongSpeech,
         isUpdate: false
       });
 
@@ -6236,6 +6242,10 @@ async function polishLiveTranslation(translated, original, targetLang = 'vi', to
     }
   }
 
+  if ((targetLang || '').toLowerCase() === 'vi') {
+    polished = deTranslationeseVi(polished);
+  }
+
   // Spoken subtitles must never carry parenthetical glosses: TTS reads the
   // brackets out loud ("trượt giá mở ngoặc slippage đóng ngoặc") and on screen
   // they are the clearest tell of machine output. Sixteen crypto rules insert
@@ -6246,6 +6256,75 @@ async function polishLiveTranslation(translated, original, targetLang = 'vi', to
   polished = polished.replace(/\s{2,}/g, ' ').trim();
 
   return polished;
+}
+
+// ─── Vietnamese de-translationese ────────────────────────────────────────────
+// Everything else in polishLiveTranslation swaps TERMS; nothing addressed
+// SYNTAX, so the calques that make output read as machine translation survived
+// on both paths — and on the Google path, which has no prompt channel at all,
+// nothing else could catch them.
+//
+// These rules are deliberately high-precision and low-recall. The lesson from
+// the old `general.vi` block is that a post-filter which fires where it should
+// not is far worse than one that misses: it silently overrides deliberate
+// choices and corrupts ordinary words. So each rule carries an explicit
+// whitelist rather than matching a general shape, and every one is covered by
+// negative cases in the test suite.
+const _VI_LETTER = '[a-zA-ZÀ-ỹ]';
+const _VI_NB = `(?<!${_VI_LETTER})`;
+const _VI_NA = `(?!${_VI_LETTER})`;
+
+// Verbs after which spoken Vietnamese says "là", not the bookish "rằng".
+const _VI_SAY_VERBS = ['nói', 'nghĩ', 'tin', 'cho', 'thấy', 'hiểu', 'biết', 'khẳng định', 'công nhận'];
+
+// Adjectives that really do appear in the "một cách X" adverbial calque.
+const _VI_ADV_ADJ = [
+  'đáng kể', 'nhanh chóng', 'dễ dàng', 'hiệu quả', 'an toàn', 'chính xác',
+  'rõ ràng', 'tự động', 'hoàn toàn', 'đơn giản', 'trực tiếp', 'độc lập',
+  'liên tục', 'nhanh', 'chậm', 'đáng tin cậy', 'minh bạch', 'công khai'
+];
+// ...but "một cách" is also article + noun ("một cách làm hay" = a good way).
+// After any of these verbs it is the noun reading, so leave it alone.
+const _VI_NOUN_TAKERS = ['tìm', 'có', 'là', 'cần', 'muốn', 'chọn', 'dùng', 'theo', 'bằng', 'với', 'thành'];
+
+// Nouns that "thực hiện"/"tiến hành" nominalise for no reason: a person just
+// says "giao dịch", not "thực hiện giao dịch".
+const _VI_ACTION_NOUNS = [
+  'giao dịch', 'thanh toán', 'chuyển khoản', 'đặt lệnh', 'kiểm tra',
+  'thay đổi', 'cập nhật', 'nâng cấp', 'triển khai'
+];
+
+const _VI_RE_MEANS_UPPER = new RegExp(`${_VI_NB}Điều (?:đó|này|đấy) có nghĩa là${_VI_NA}`, 'g');
+const _VI_RE_MEANS_LOWER = new RegExp(`${_VI_NB}điều (?:đó|này|đấy) có nghĩa là${_VI_NA}`, 'g');
+const _VI_RE_RANG = new RegExp(`${_VI_NB}(${_VI_SAY_VERBS.join('|')}) rằng${_VI_NA}`, 'gi');
+const _VI_RE_MOTCACH = new RegExp(
+  `${_VI_NB}(${_VI_NOUN_TAKERS.join('|')})?(\\s*)một cách (${_VI_ADV_ADJ.join('|')})${_VI_NA}`, 'gi');
+const _VI_RE_THUCHIEN = new RegExp(
+  `${_VI_NB}(?:thực hiện|tiến hành) (${_VI_ACTION_NOUNS.join('|')})${_VI_NA}`, 'gi');
+
+// Dropping a leading word must not drop the sentence's capital letter — that is
+// how the old /công chúng/ rule turned "Công chúng" into "công khai".
+function _viKeepCase(match, out) {
+  const c = match.charAt(0);
+  return (c === c.toUpperCase() && c !== c.toLowerCase())
+    ? out.charAt(0).toUpperCase() + out.slice(1)
+    : out;
+}
+
+function deTranslationeseVi(text) {
+  if (!text || typeof text !== 'string') return text || '';
+  let t = text;
+  // "That means ..." rendered literally. Nobody opens a spoken sentence this way.
+  t = t.replace(_VI_RE_MEANS_UPPER, 'Tức là').replace(_VI_RE_MEANS_LOWER, 'tức là');
+  // "nói rằng" -> "nói là". Only after a speech verb, so no other "rằng" moves
+  // and the unrelated word "ràng"/"Rằng buộc" is untouched.
+  t = t.replace(_VI_RE_RANG, (m, v) => `${v} là`);
+  // Adverbial "một cách X" -> bare "X", unless a noun-taking verb precedes it.
+  t = t.replace(_VI_RE_MOTCACH, (m, pre, sp, adj) =>
+    pre ? m : `${sp}${_viKeepCase(m.trimStart(), adj)}`);
+  // "thực hiện giao dịch" -> "giao dịch".
+  t = t.replace(_VI_RE_THUCHIEN, (m, n) => _viKeepCase(m, n));
+  return t;
 }
 
 // In-Memory Caption History Manager
@@ -6710,18 +6789,6 @@ async function initSettingsCache() {
 
 // Real-time storage listener — keeps the in-memory cache fresh without polling.
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  // Clear ASR prompt chaining history if language or topic changes
-  if (changes.ltSourceLang || changes.ltTopic) {
-    if (self.ltSessions) {
-      for (const tid in self.ltSessions) {
-        if (self.ltSessions[tid]) {
-          self.ltSessions[tid].cleanAsrHistory = [];
-        }
-      }
-    }
-    console.log('🔄 [BG] ltSourceLang or ltTopic changed, reset cleanAsrHistory for all sessions.');
-  }
-
   const syncMap = {
     ltAsrEngine: (v) => { _cachedAsrEngine = v; },
     openaiApiKey: (v) => { _cachedOpenaiApiKey = v; },
