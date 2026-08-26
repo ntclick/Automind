@@ -4167,6 +4167,46 @@ const RMS_MIN_THRESHOLD = 0.004;
 // stream that mixes music and dialogue is handled correctly either way.
 const RMS_STRONG_SPEECH_MULTIPLIER = 2.5;
 
+// ─── ASR call pacing ─────────────────────────────────────────────────────────
+// Chunks are handed to the transcriber without awaiting, so nothing bounded how
+// many were in flight: a burst of short segments fired a burst of requests and
+// tripped the provider's per-minute limit. Cap concurrency and, once a rate
+// limit is actually seen, space calls out until it clears.
+const ASR_MAX_IN_FLIGHT = 2;
+let _asrInFlight = 0;
+const _asrWaiters = [];
+let _asrRateLimitedUntil = 0;
+let _asrRateLimitStreak = 0;
+
+function noteAsrRateLimit(limited) {
+  if (limited) {
+    _asrRateLimitStreak = Math.min(_asrRateLimitStreak + 1, 6);
+    // Widen the spacing each time it happens, up to 4s between calls.
+    const spacing = Math.min(500 * Math.pow(2, _asrRateLimitStreak - 1), 4000);
+    _asrRateLimitedUntil = Date.now() + spacing;
+    console.warn(`⚠️ [BG] ASR rate limited — spacing calls ${spacing}ms (streak ${_asrRateLimitStreak}).`);
+  } else if (_asrRateLimitStreak > 0) {
+    _asrRateLimitStreak = 0;
+    _asrRateLimitedUntil = 0;
+    console.log('✅ [BG] ASR rate limit cleared.');
+  }
+}
+
+async function acquireAsrSlot() {
+  if (_asrInFlight >= ASR_MAX_IN_FLIGHT) {
+    await new Promise(resolve => _asrWaiters.push(resolve));
+  }
+  _asrInFlight++;
+  const wait = _asrRateLimitedUntil - Date.now();
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+}
+
+function releaseAsrSlot() {
+  _asrInFlight = Math.max(0, _asrInFlight - 1);
+  const next = _asrWaiters.shift();
+  if (next) next();
+}
+
 function isStrongSpeech(maxRms) {
   return typeof maxRms === 'number' && maxRms >= RMS_MIN_THRESHOLD * RMS_STRONG_SPEECH_MULTIPLIER;
 }
@@ -4210,12 +4250,16 @@ async function transcribeAudioSegmentConcurrently(audioBase64, config, seq, sess
   let success = true;
   let errorMsg = '';
 
+  let asrSlotHeld = false;
   try {
     // The ASR engine is whatever the user picked in Options — nothing silently
     // reroutes to a pricier provider. Prompt chaining (feeding recent output
     // back in as Whisper's prompt) is gone too: it sharpened proper nouns but
     // is a known amplifier of Whisper's repetition/hallucination loops.
     let customPrompt = '';
+
+    await acquireAsrSlot();
+    asrSlotHeld = true;
 
     if (asrEngine === 'groq') {
       const groqKey = _cachedGroqApiKey;
@@ -4237,6 +4281,9 @@ async function transcribeAudioSegmentConcurrently(audioBase64, config, seq, sess
     }
     _asrFailStreak = 0; // reset warning gate on any successful transcription
   } catch (err) {
+    if (err && (err.status === 429 || err.status === 503)) {
+      notifyDegraded('asr-rate-limit', 'ASR bị giới hạn tốc độ — đang giãn nhịp gọi');
+    }
     console.error(`❌ [BG] Parallel transcription failed for segment ${seq}:`, err);
     // Only surface a user-facing toast after 2+ consecutive failures.
     // A single transient network blip self-heals via the next segment and the
@@ -4249,6 +4296,7 @@ async function transcribeAudioSegmentConcurrently(audioBase64, config, seq, sess
     success = false;
     errorMsg = err.message;
   } finally {
+    if (asrSlotHeld) releaseAsrSlot();
     // ALWAYS populate the buffer slot even if the chunk failed or threw an error,
     // to prevent blocking the sequential chronological reassembly queue!
     if (!session.transcriptionBuffer) {
@@ -4483,8 +4531,15 @@ async function _drainReadyTranscriptions(session, config, tabId) {
       // on the same serial chain as final translations — O(n²) work that delayed
       // final subtitles. Skipped interims are harmless: the next chunk (or the
       // final translation) supersedes them anyway.
-      if (!session._interimBusy) {
+      // Interim lines were fired once per chunk, which roughly doubled the
+      // request rate for output that is thrown away the moment the real
+      // translation lands. With the sentence hold now at 2500ms the gap they
+      // cover is much shorter, so one every 1500ms is enough to keep the overlay
+      // alive without paying for the rest.
+      const sinceLastInterim = Date.now() - (session._lastInterimAt || 0);
+      if (!session._interimBusy && sinceLastInterim >= 1500) {
         session._interimBusy = true;
+        session._lastInterimAt = Date.now();
         session.translationChain = (session.translationChain || Promise.resolve()).then(async () => {
           try {
             let interimTranslated = await translateGoogleBg(currentText, targetLang);
@@ -4822,7 +4877,7 @@ async function transcribeWhisper(audioBase64, sourceLang, targetLang, whisperKey
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`Whisper ASR HTTP failed (${response.status}): ${errorText}`);
+        throw asrHttpError('Whisper', response, errorText);
       }
 
       const data = await response.json();
@@ -4836,15 +4891,47 @@ async function transcribeWhisper(audioBase64, sourceLang, targetLang, whisperKey
     }
   };
 
-  // Retry logic: 1 retry (total 2 attempts) — more retries add latency, not accuracy, in a live pipeline
-  const maxAttempts = 2;
+  return runAsrWithRetry('OpenAI Whisper', executeCall);
+}
+
+/**
+ * Wrap an ASR HTTP failure so the retry loop can tell a rate limit apart from a
+ * genuine error. Without the status, a 429 was retried after a flat 500ms — which
+ * hits the same limit again and makes the situation worse, not better.
+ */
+function asrHttpError(label, response, errorText) {
+  const err = new Error(`${label} ASR HTTP failed (${response.status}): ${errorText}`);
+  err.status = response.status;
+  const retryAfter = response.headers && response.headers.get && response.headers.get('retry-after');
+  if (retryAfter) {
+    const secs = parseFloat(retryAfter);
+    if (Number.isFinite(secs)) err.retryAfterMs = Math.min(secs * 1000, 30000);
+  }
+  return err;
+}
+
+// Rate limits are the one ASR failure worth waiting on: the request was well
+// formed and would succeed a moment later. Everything else (bad key, bad audio)
+// fails the same way on a retry, so retrying it only adds latency to a live feed.
+async function runAsrWithRetry(label, executeCall) {
+  const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await executeCall();
+      const out = await executeCall();
+      noteAsrRateLimit(false);
+      return out;
     } catch (err) {
-      console.warn(`⚠️ OpenAI Whisper ASR attempt ${attempt} failed:`, err.message);
+      const limited = err.status === 429 || err.status === 503;
+      if (limited) noteAsrRateLimit(true);
+      console.warn(`⚠️ ${label} ASR attempt ${attempt} failed${limited ? ' (rate limited)' : ''}:`, err.message);
       if (attempt === maxAttempts) throw err;
-      await new Promise(resolve => setTimeout(resolve, 500)); // wait 500ms before retrying
+      // Only a rate limit earns a real wait, and honour Retry-After when the
+      // server sends one. Other errors get the old short pause.
+      const wait = limited
+        ? (err.retryAfterMs || Math.min(1000 * Math.pow(2, attempt - 1), 8000))
+        : 500;
+      if (!limited && attempt >= 2) throw err;
+      await new Promise(resolve => setTimeout(resolve, wait));
     }
   }
 }
@@ -4890,7 +4977,7 @@ async function transcribeGroq(audioBase64, sourceLang, targetLang, groqKey, groq
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`Groq ASR HTTP failed (${response.status}): ${errorText}`);
+        throw asrHttpError('Groq', response, errorText);
       }
 
       const data = await response.json();
@@ -4904,17 +4991,7 @@ async function transcribeGroq(audioBase64, sourceLang, targetLang, groqKey, groq
     }
   };
 
-  // Retry logic: 1 retry (total 2 attempts) — more retries add latency, not accuracy, in a live pipeline
-  const maxAttempts = 2;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await executeCall();
-    } catch (err) {
-      console.warn(`⚠️ Groq ASR attempt ${attempt} failed:`, err.message);
-      if (attempt === maxAttempts) throw err;
-      await new Promise(resolve => setTimeout(resolve, 500)); // wait 500ms before retrying
-    }
-  }
+  return runAsrWithRetry('Groq', executeCall);
 }
 
 async function translateGoogleBg(text, targetLang) {
@@ -5988,6 +6065,11 @@ function isSemanticallyIncomplete(text) {
  * - English / auto source only: apply the English dangling-word heuristic.
  * - Non-English: rely on time-cap (3.5 s) to avoid holding chunks indefinitely.
  */
+// How long an unpunctuated fragment may be held back waiting for the rest of its
+// sentence. Trades caption naturalness against the delay a viewer feels; raise it
+// if lines start arriving as disconnected fragments.
+const SENTENCE_HOLD_MS = 2500;
+
 function shouldFinalizeSegment({ text, sourceLang, endsWithPunctuation, hasMultipleSentences, wordCount, accumulatedMs }) {
   // Always finalize on clear sentence boundaries
   if (endsWithPunctuation || hasMultipleSentences) return true;
@@ -6016,7 +6098,13 @@ function shouldFinalizeSegment({ text, sourceLang, endsWithPunctuation, hasMulti
   const isEnglishLike = !sourceLang || sourceLang === 'auto' || sourceLang === 'en';
   if (isEnglishLike) {
     if (accumulatedMs === undefined) return true;
-    return accumulatedMs >= 5000;
+    // This hold is pure added latency: the words are already transcribed and are
+    // being kept back purely so an unpunctuated fragment can find its sentence.
+    // At 5000ms it dominated the delay a viewer feels, on top of the chunk, the
+    // ASR round trip and the translation round trip. 2500ms still absorbs the
+    // common mid-sentence pause; the punctuation and word-count rules above
+    // still finalise earlier whenever the sentence genuinely ends.
+    return accumulatedMs >= SENTENCE_HOLD_MS;
   }
 
   // Non-English, non-CJK: apply time-cap to avoid holding chunks indefinitely.
