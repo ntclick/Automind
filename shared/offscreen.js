@@ -649,9 +649,10 @@ function stopCapture() {
     stopStreamingAsr();
   } catch (_) {}
 
-  try {
-    stopTtsAudio();
-  } catch (_) {}
+  // (There used to be a stopTtsAudio() call here. No such function has ever been
+  // defined in this file, so every stop threw a ReferenceError that the catch
+  // swallowed — harmless, but it meant the line was never doing anything. TTS is
+  // owned by the service worker via chrome.tts and is stopped by clearTtsState().)
 
   window._playbackGainNode = null;
 

@@ -826,7 +826,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           if (piece) {
             st.translated = st.translated ? `${st.translated} ${piece}` : piece;
             if (_cachedTtsEnabled) {
-              speakSubtitle(piece, cfg.targetLang || 'vi', _cachedTtsSpeed || 1.25, remainder, session.segmentId, ++session.subtitleSeq);
+              speakSubtitle(piece, cfg.targetLang || 'vi', _cachedTtsSpeed || 1.25, remainder, session.segmentId, (session.subtitleSeq = (session.subtitleSeq || 0) + 1));
             }
           }
         }
@@ -4342,7 +4342,7 @@ const CABIN_MIN_PHRASE_WORDS = 3;
 
 function cabinState(session) {
   if (!session._cabin) {
-    session._cabin = { committed: 0, translated: '', lastAt: 0, busy: false };
+    session._cabin = { committed: 0, translated: '', lastAt: 0, busy: false, lastPaintAt: 0 };
   }
   return session._cabin;
 }
@@ -4382,20 +4382,35 @@ async function handleCabinInterim(request) {
   }
   const session = self.ltSessions[tabId];
   const cfg = request.config || {};
-  const st = cabinState(session);
 
-  if (!session._utteranceStartedAt) session._utteranceStartedAt = Date.now();
+  // A new utterance begins whenever the previous one was closed out. Reset the
+  // phrase cursor here rather than only on the final: if the socket drops or the
+  // recogniser never sends a final, a stale `committed` offset would slice the
+  // NEXT utterance from the wrong index and silently swallow its opening words.
+  if (!session._utteranceStartedAt) {
+    session._cabin = null;
+    session._utteranceStartedAt = Date.now();
+  }
+  const st = cabinState(session);
 
   const words = String(request.text || '').trim().split(/\s+/).filter(Boolean);
   // Show the speaker's own words running ahead of the translation, so the tail
   // of the sentence is never a blank gap while its phrase is still in flight.
-  broadcastMessage({
-    action: 'lt_cabin_line',
-    translated: st.translated,
-    tail: words.slice(st.committed).join(' '),
-    targetLang: cfg.targetLang || 'vi',
-    done: false
-  });
+  //
+  // Throttled: a recogniser can revise its hypothesis several times a second and
+  // each of these costs two extension message hops plus a DOM rebuild, for a
+  // change the eye cannot resolve anyway. ~8/s still reads as continuous.
+  const nowMs = Date.now();
+  if (nowMs - (st.lastPaintAt || 0) >= 120) {
+    st.lastPaintAt = nowMs;
+    broadcastMessage({
+      action: 'lt_cabin_line',
+      translated: st.translated,
+      tail: words.slice(st.committed).join(' '),
+      targetLang: cfg.targetLang || 'vi',
+      done: false
+    });
+  }
 
   if (st.busy) return;
   if (Date.now() - st.lastAt < CABIN_MIN_INTERVAL_MS) return;
@@ -4427,7 +4442,7 @@ async function handleCabinInterim(request) {
       // Speak only the new piece. The voice then runs continuously alongside the
       // speaker instead of falling silent until the sentence closes.
       if (_cachedTtsEnabled) {
-        speakSubtitle(piece, cfg.targetLang || 'vi', _cachedTtsSpeed || 1.25, phrase, session.segmentId, ++session.subtitleSeq);
+        speakSubtitle(piece, cfg.targetLang || 'vi', _cachedTtsSpeed || 1.25, phrase, session.segmentId, (session.subtitleSeq = (session.subtitleSeq || 0) + 1));
       }
     }
   } catch (err) {
