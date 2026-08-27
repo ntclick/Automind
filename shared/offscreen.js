@@ -216,6 +216,18 @@ async function startCapture(streamId, config) {
   // the compressor's makeup gain makes perfectly audible, causing false skips.
   captureGain.connect(analyser);
 
+  // ─── Streaming ASR takes over from here ──────────────────────────────────
+  // The recorder/VAD machinery below exists to cut audio into files for a batch
+  // transcriber. A streaming recogniser does its own endpointing on a continuous
+  // sample stream, so none of it applies — and running both would transcribe
+  // every second of audio twice.
+  if (config.ltAsrEngine === 'deepgram') {
+    console.log('🎙️ [Offscreen] Streaming ASR mode — MediaRecorder chunking disabled.');
+    startStreamingAsr(config, captureGain);
+    sendMessageWithRetry({ action: 'lt_capture_ready' }).catch(() => {});
+    return;
+  }
+
   // Per recorder, for the same reason as the RMS accumulators above.
   let hasSoundInSegment = [false, false];
   // NOT per recorder, and deliberately not reset at a swap: this is the running
@@ -388,6 +400,227 @@ async function startCapture(streamId, config) {
   }
 }
 
+// ─── Streaming ASR ("dịch cabin") ────────────────────────────────────────────
+// Batch ASR cannot start until a chunk is closed, so the earliest any text can
+// appear is chunk length + upload + inference. A streaming recogniser instead
+// returns hypotheses while the person is still talking, which is what lets the
+// caption run 2-3s behind live rather than 8.
+//
+// The socket lives here, not in the service worker: this is where the audio
+// already is, and an MV3 worker can be evicted mid-sentence.
+
+const DG_ENDPOINT = 'wss://api.deepgram.com/v1/listen';
+
+let dgSocket = null;
+let dgWorkletNode = null;
+let dgKeepAlive = null;
+let dgReconnectTimer = null;
+let dgReconnectAttempt = 0;
+let dgClosingIntentionally = false;
+let dgConfig = null;
+let dgSampleRate = 48000;
+// Audio recorded while the socket is down. Bounded, because holding more than a
+// couple of seconds would just replay stale speech after a reconnect.
+let dgPending = [];
+let dgPendingBytes = 0;
+const DG_PENDING_MAX_BYTES = 2 * 48000 * 2; // ~2s of linear16 at 48kHz
+
+function dgUrl(config) {
+  const p = new URLSearchParams({
+    model: config.dgModel || 'nova-2',
+    encoding: 'linear16',
+    sample_rate: String(dgSampleRate),
+    channels: '1',
+    interim_results: 'true',   // the whole point — partial text as it is spoken
+    punctuate: 'true',
+    smart_format: 'true',
+    // Endpointing decides when a pause means "sentence over". 300ms clears an
+    // ordinary mid-clause pause without waiting out a full stop.
+    endpointing: String(config.dgEndpointing || 300)
+  });
+  const lang = config.sourceLang && config.sourceLang !== 'auto' ? config.sourceLang : null;
+  if (lang) p.set('language', lang);
+  else p.set('detect_language', 'true');
+  return `${DG_ENDPOINT}?${p.toString()}`;
+}
+
+function startStreamingAsr(config, sourceNode) {
+  dgConfig = config;
+  dgClosingIntentionally = false;
+  dgSampleRate = (audioCtx && audioCtx.sampleRate) || 48000;
+  openDeepgramSocket();
+  attachPcmTap(sourceNode);
+}
+
+function openDeepgramSocket() {
+  const key = dgConfig && dgConfig.dgApiKey;
+  if (!key) {
+    console.error('🎙️ [Offscreen] Streaming ASR selected but no Deepgram key configured.');
+    sendMessageWithRetry({ action: 'lt_error', error: 'Streaming ASR needs a Deepgram API key (Options → Speech engine).' }).catch(() => {});
+    return;
+  }
+
+  try {
+    // Browsers forbid custom headers on WebSocket, so the key rides in the
+    // Sec-WebSocket-Protocol handshake instead. Deepgram documents exactly this
+    // pair for client-side connections.
+    dgSocket = new WebSocket(dgUrl(dgConfig), ['token', key]);
+  } catch (err) {
+    console.error('🎙️ [Offscreen] Could not open Deepgram socket:', err);
+    scheduleDgReconnect();
+    return;
+  }
+
+  dgSocket.binaryType = 'arraybuffer';
+
+  dgSocket.onopen = () => {
+    console.log('🎙️ [Offscreen] Streaming ASR connected.');
+    dgReconnectAttempt = 0;
+    sendMessageWithRetry({ action: 'lt_stream_state', state: 'connected' }).catch(() => {});
+    // Flush whatever was captured while we were down.
+    for (const buf of dgPending) {
+      try { dgSocket.send(buf); } catch (_) {}
+    }
+    dgPending = [];
+    dgPendingBytes = 0;
+    // Deepgram closes an idle socket; a muted tab sends silence, not nothing.
+    dgKeepAlive = setInterval(() => {
+      if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+        try { dgSocket.send(JSON.stringify({ type: 'KeepAlive' })); } catch (_) {}
+      }
+    }, 8000);
+  };
+
+  dgSocket.onmessage = (evt) => {
+    let msg;
+    try { msg = JSON.parse(typeof evt.data === 'string' ? evt.data : ''); } catch (_) { return; }
+    if (!msg) return;
+
+    if (msg.type === 'Results' || msg.channel) {
+      const alt = msg.channel && msg.channel.alternatives && msg.channel.alternatives[0];
+      const transcript = (alt && alt.transcript || '').trim();
+      if (!transcript) return;
+
+      // is_final: this wording is settled and will not be revised.
+      // speech_final: the speaker also paused, so it is a sentence boundary.
+      if (msg.is_final || msg.speech_final) {
+        sendMessageWithRetry({
+          action: 'lt_stream_final',
+          text: transcript,
+          speechFinal: !!msg.speech_final,
+          config: dgConfig
+        }).catch(() => {});
+      } else {
+        sendMessageWithRetry({
+          action: 'lt_stream_interim',
+          text: transcript,
+          config: dgConfig
+        }).catch(() => {});
+      }
+    } else if (msg.type === 'Metadata') {
+      console.log('🎙️ [Offscreen] Deepgram metadata:', msg.request_id || '');
+    }
+  };
+
+  dgSocket.onerror = (err) => {
+    console.warn('🎙️ [Offscreen] Streaming ASR socket error:', err && err.message);
+  };
+
+  dgSocket.onclose = (evt) => {
+    if (dgKeepAlive) { clearInterval(dgKeepAlive); dgKeepAlive = null; }
+    if (dgClosingIntentionally) {
+      console.log('🎙️ [Offscreen] Streaming ASR closed.');
+      return;
+    }
+    // 1008/4001-4009 are Deepgram auth/param rejections: reconnecting with the
+    // same bad key or bad params just loops, so surface it instead.
+    const fatal = evt && (evt.code === 1008 || (evt.code >= 4000 && evt.code <= 4099));
+    console.warn(`🎙️ [Offscreen] Streaming ASR closed (code ${evt && evt.code}).`);
+    if (fatal) {
+      sendMessageWithRetry({
+        action: 'lt_error',
+        error: `Streaming ASR rejected the connection (code ${evt.code}). Check the Deepgram key and language setting.`
+      }).catch(() => {});
+      return;
+    }
+    scheduleDgReconnect();
+  };
+}
+
+function scheduleDgReconnect() {
+  if (dgClosingIntentionally || dgReconnectTimer) return;
+  dgReconnectAttempt = Math.min(dgReconnectAttempt + 1, 6);
+  const delay = Math.min(500 * Math.pow(2, dgReconnectAttempt - 1), 15000);
+  console.log(`🎙️ [Offscreen] Reconnecting streaming ASR in ${delay}ms (attempt ${dgReconnectAttempt}).`);
+  sendMessageWithRetry({ action: 'lt_stream_state', state: 'reconnecting' }).catch(() => {});
+  dgReconnectTimer = setTimeout(() => {
+    dgReconnectTimer = null;
+    if (!dgClosingIntentionally && audioStream) openDeepgramSocket();
+  }, delay);
+}
+
+async function attachPcmTap(sourceNode) {
+  try {
+    await audioCtx.audioWorklet.addModule('./pcm-worklet.js');
+  } catch (err) {
+    console.error('🎙️ [Offscreen] Failed to load PCM worklet:', err);
+    sendMessageWithRetry({ action: 'lt_error', error: 'Could not start the audio tap for streaming ASR.' }).catch(() => {});
+    return;
+  }
+
+  dgWorkletNode = new AudioWorkletNode(audioCtx, 'pcm-tap', {
+    numberOfInputs: 1,
+    numberOfOutputs: 0
+  });
+
+  dgWorkletNode.port.onmessage = (e) => {
+    const pcm = e.data;
+    if (!pcm || !pcm.buffer) return;
+    if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+      try { dgSocket.send(pcm.buffer); } catch (_) {}
+      return;
+    }
+    // Socket is down — keep a short tail so a quick reconnect loses nothing.
+    dgPending.push(pcm.buffer);
+    dgPendingBytes += pcm.buffer.byteLength;
+    while (dgPendingBytes > DG_PENDING_MAX_BYTES && dgPending.length) {
+      dgPendingBytes -= dgPending.shift().byteLength;
+    }
+  };
+
+  sourceNode.connect(dgWorkletNode);
+  console.log(`🎙️ [Offscreen] PCM tap attached at ${dgSampleRate}Hz.`);
+}
+
+function stopStreamingAsr() {
+  dgClosingIntentionally = true;
+
+  if (dgReconnectTimer) { clearTimeout(dgReconnectTimer); dgReconnectTimer = null; }
+  if (dgKeepAlive) { clearInterval(dgKeepAlive); dgKeepAlive = null; }
+
+  if (dgWorkletNode) {
+    try { dgWorkletNode.port.postMessage({ type: 'stop' }); } catch (_) {}
+    try { dgWorkletNode.disconnect(); } catch (_) {}
+    dgWorkletNode = null;
+  }
+
+  if (dgSocket) {
+    try {
+      if (dgSocket.readyState === WebSocket.OPEN) {
+        // Ask for the tail of the transcript before dropping the connection.
+        dgSocket.send(JSON.stringify({ type: 'CloseStream' }));
+      }
+      dgSocket.close();
+    } catch (_) {}
+    dgSocket = null;
+  }
+
+  dgPending = [];
+  dgPendingBytes = 0;
+  dgReconnectAttempt = 0;
+  dgConfig = null;
+}
+
 async function processAudioBlob(blob, config, hasSound, maxRms, avgRms, durationMs) {
   const currentSeq = chunkSeq++;
   console.log(`🎙️ [Offscreen] Segment ${currentSeq} confirmed (${durationMs}ms) — sending to background.`);
@@ -411,6 +644,10 @@ async function processAudioBlob(blob, config, hasSound, maxRms, avgRms, duration
 
 function stopCapture() {
   console.log('🎙️ [Offscreen] Stopping tab capture...');
+
+  try {
+    stopStreamingAsr();
+  } catch (_) {}
 
   try {
     stopTtsAudio();

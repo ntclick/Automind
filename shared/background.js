@@ -746,6 +746,96 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  // ─── Streaming ASR ("dịch cabin") ──────────────────────────────────────────
+  // Partial wording, still being revised. Put it on screen immediately: this is
+  // the whole reason for streaming, and it costs no API call. Deliberately NOT
+  // translated — a machine translation of half a clause is worse than showing
+  // the speaker's own words until the wording settles.
+  if (request.action === 'lt_stream_interim') {
+    try {
+      const tabId = activeTabId;
+      const session = tabId && self.ltSessions && self.ltSessions[tabId];
+      if (session && !session._utteranceStartedAt) session._utteranceStartedAt = Date.now();
+      broadcastMessage({
+        action: 'lt_subtitle',
+        original: '',
+        translated: '🎙️ ' + request.text,
+        mode: 'tabCapture',
+        timestamp: Date.now(),
+        isUpdate: true
+      });
+      sendResponse({ success: true });
+    } catch (err) {
+      sendResponse({ success: false, error: err.message });
+    }
+    return true;
+  }
+
+  // Settled wording. Translate it now — no chunk accumulation and no sentence
+  // hold, because the recogniser's own endpointing already decided this is a
+  // sentence boundary. That is what removes ~5s from the batch path.
+  if (request.action === 'lt_stream_final') {
+    (async () => {
+      try {
+        const cfg = request.config || {};
+        const tabId = activeTabId;
+        if (!tabId) { sendResponse({ success: false, error: 'no active tab' }); return; }
+        if (!self.ltSessions) self.ltSessions = {};
+        if (!self.ltSessions[tabId]) {
+          self.ltSessions[tabId] = {
+            chunks: [], lastText: '', lastTimestamp: Date.now(), history: [],
+            segmentId: 'seg_' + Date.now() + '_' + Math.floor(Math.random() * 1000)
+          };
+        }
+        const session = self.ltSessions[tabId];
+        const activeTopic = _cachedTopic || 'general';
+
+        let text = cleanAndPrecorrectOriginalText(request.text, activeTopic);
+        text = cleanConsecutiveDuplicates(text);
+        if (!text || !text.trim()) { sendResponse({ success: true, filtered: true }); return; }
+
+        // The streaming recogniser is listening to the same audio the batch path
+        // gated on loudness, but gives us no RMS. Treat settled speech as real
+        // speech: it reached an endpoint, which silence does not.
+        if (isWhisperHallucination(text, true) || isRepetitionOfHistory(text, session.history || [])) {
+          console.log('🎙️ [BG] Streaming segment filtered:', text.trim());
+          session._utteranceStartedAt = 0;
+          sendResponse({ success: true, filtered: true });
+          return;
+        }
+
+        // How long this utterance actually took to say, measured from the first
+        // partial. The overlay uses it to hold the line for its spoken length.
+        const startedAt = session._utteranceStartedAt || 0;
+        session.audioMs = startedAt ? Math.min(Date.now() - startedAt, 15000) : 0;
+        session._utteranceStartedAt = 0;
+
+        session.chunks = [text];
+        session.lastStrongSpeech = true;
+        await finalizeAndTranslateSentence(
+          session,
+          cfg.sourceLang || 'auto',
+          cfg.targetLang || 'vi',
+          cfg.ltEngine,
+          activeTopic
+        );
+        sendResponse({ success: true });
+      } catch (err) {
+        console.error('❌ [BG] lt_stream_final failed:', err);
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  if (request.action === 'lt_stream_state') {
+    if (request.state === 'reconnecting') {
+      notifyDegraded('asr-reconnect', 'Mất kết nối ASR — đang kết nối lại');
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (request.action === 'lt_process_text') {
     (async () => {
       try {
@@ -3931,7 +4021,14 @@ async function startTabCapture(tabId, streamId, config, trigger = 'unknown') {
         ...config,
         ltMuteTab: isMuted,
         ltTtsEnabled: isTtsEnabled,
-        ltTtsOriginalAudio: storageData.ltTtsOriginalAudio || 'mute'
+        ltTtsOriginalAudio: storageData.ltTtsOriginalAudio || 'mute',
+        // Streaming ASR runs its socket in the offscreen document, so it needs
+        // the engine choice and key up front — the service worker may be evicted
+        // long before the stream ends.
+        ltAsrEngine: _cachedAsrEngine,
+        dgApiKey: _cachedDeepgramApiKey,
+        dgModel: _cachedDeepgramModel || 'nova-2',
+        tabId: tabId
       }
     });
 
@@ -6473,6 +6570,8 @@ let _cachedOpenaiApiKey = '';
 let _cachedGroqApiKey = '';
 let _cachedGroqModel = 'whisper-large-v3';
 let _cachedOpenaiWhisperModel = 'whisper-1';
+let _cachedDeepgramApiKey = '';
+let _cachedDeepgramModel = 'nova-2';
 
 // Default Glossary Terminology definitions
 const DEFAULT_GLOSSARY = {
@@ -6849,7 +6948,8 @@ async function initSettingsCache() {
         'ltTopic'
       ]),
       chrome.storage.sync.get([
-        'ltTtsChromeVoiceMap', 'ltAsrEngine', 'openaiApiKey', 'groqApiKey', 'groqModel', 'openaiWhisperModel'
+        'ltTtsChromeVoiceMap', 'ltAsrEngine', 'openaiApiKey', 'groqApiKey', 'groqModel', 'openaiWhisperModel',
+        'deepgramApiKey', 'deepgramModel'
       ])
     ]);
     if (localRes.ltTtsSpeed !== undefined) _cachedTtsSpeed = parseFloat(localRes.ltTtsSpeed);
@@ -6864,6 +6964,8 @@ async function initSettingsCache() {
     _cachedGroqApiKey = syncRes.groqApiKey || '';
     _cachedGroqModel = syncRes.groqModel || 'whisper-large-v3';
     _cachedOpenaiWhisperModel = syncRes.openaiWhisperModel || 'whisper-1';
+    _cachedDeepgramApiKey = syncRes.deepgramApiKey || '';
+    _cachedDeepgramModel = syncRes.deepgramModel || 'nova-2';
 
     console.log('🎙️ [BG] Settings cache initialized:', {
       speed: _cachedTtsSpeed, gender: _cachedTtsGender, enabled: _cachedTtsEnabled,
@@ -6882,7 +6984,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     openaiApiKey: (v) => { _cachedOpenaiApiKey = v; },
     groqApiKey: (v) => { _cachedGroqApiKey = v; },
     groqModel: (v) => { _cachedGroqModel = v; },
-    openaiWhisperModel: (v) => { _cachedOpenaiWhisperModel = v; }
+    openaiWhisperModel: (v) => { _cachedOpenaiWhisperModel = v; },
+    deepgramApiKey: (v) => { _cachedDeepgramApiKey = v; },
+    deepgramModel: (v) => { _cachedDeepgramModel = v; }
   };
   const localMap = {
     ltTtsSpeed:   (v) => { _cachedTtsSpeed = parseFloat(v); },

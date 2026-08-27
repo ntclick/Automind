@@ -780,6 +780,7 @@
           <select id="ltAsrEngine">
             <option value="groq" selected>Groq Whisper — low latency (needs Groq key)</option>
             <option value="whisper">OpenAI Whisper — highest accuracy (needs OpenAI key)</option>
+            <option value="deepgram">Deepgram Streaming — interpreter-style, ~2-3s behind (needs Deepgram key)</option>
             <option value="webSpeech">Web Speech API — free, uses your microphone</option>
           </select>
           <small id="asrKeyWarning" style="display:none; color:var(--warning);"></small>
@@ -822,6 +823,26 @@
               <button class="btn btn-secondary" data-action="goto-keys">Manage keys</button>
               <button class="btn btn-secondary" data-action="test-openai">Test OpenAI</button>
             </div>
+          </div>
+        </div>
+
+        <div id="asrOptionsDeepgram" class="asr-engine-options" style="display:none;">
+          <div class="form-group">
+            <label for="deepgramModel">Deepgram · Model</label>
+            <select id="deepgramModel">
+              <option value="nova-2" selected>nova-2 (recommended)</option>
+              <option value="nova-3">nova-3 (newest)</option>
+              <option value="enhanced">enhanced</option>
+            </select>
+            <small id="asrDeepgramKeyState">Checking key…</small>
+          </div>
+          <div class="form-group">
+            <label for="deepgramApiKey">Deepgram API Key</label>
+            <input type="password" id="deepgramApiKey" placeholder="Paste your Deepgram key">
+            <small>The other engines send finished audio clips and wait for the text. This one keeps a live connection open and returns words while they are still being spoken, so captions run about 2-3 seconds behind instead of 8. It also stops the burst of separate requests that trips rate limits. Billed per minute of audio rather than per clip.</small>
+          </div>
+          <div class="provider-action-group">
+            <a href="https://console.deepgram.com/signup" target="_blank" class="provider-link">Get key from Deepgram →</a>
           </div>
         </div>
 

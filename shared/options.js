@@ -1591,6 +1591,7 @@ class UserSettings {
         const blocks = {
             groq: 'asrOptionsGroq',
             whisper: 'asrOptionsWhisper',
+            deepgram: 'asrOptionsDeepgram',
             webSpeech: 'asrOptionsWebSpeech'
         };
         Object.entries(blocks).forEach(([name, id]) => {
@@ -1600,7 +1601,7 @@ class UserSettings {
 
         // Read the live input first so the state updates as the user types in
         // the vault, and only fall back to what is actually stored.
-        const stored = await chrome.storage.sync.get(['groqApiKey', 'openaiApiKey']);
+        const stored = await chrome.storage.sync.get(['groqApiKey', 'openaiApiKey', 'deepgramApiKey']);
         const keyValue = (inputId, storedValue) => {
             const input = document.getElementById(inputId);
             const raw = input ? input.value : storedValue;
@@ -1618,6 +1619,9 @@ class UserSettings {
 
         paint('asrGroqKeyState', !!keyValue('groqApiKey', stored.groqApiKey), 'Groq');
         paint('asrOpenaiKeyState', !!keyValue('openaiApiKey', stored.openaiApiKey), 'OpenAI');
+        // Deepgram's key input lives in this same block rather than the vault,
+        // so read it straight from the field the user is typing into.
+        paint('asrDeepgramKeyState', !!keyValue('deepgramApiKey', stored.deepgramApiKey), 'Deepgram');
     }
 
     /**
@@ -2078,7 +2082,33 @@ class UserSettings {
             }
 
             // Load ASR Engine settings
-            const asrSettings = await chrome.storage.sync.get(['ltAsrEngine', 'openaiWhisperModel']);
+            const asrSettings = await chrome.storage.sync.get(['ltAsrEngine', 'openaiWhisperModel', 'deepgramApiKey', 'deepgramModel']);
+
+            // Deepgram: key and model both live in the ASR block, so they save
+            // themselves rather than going through the API-key vault.
+            const dgKeyEl = document.getElementById('deepgramApiKey');
+            if (dgKeyEl) {
+                dgKeyEl.value = asrSettings.deepgramApiKey || '';
+                if (!dgKeyEl._autoSaveBound) {
+                    dgKeyEl._autoSaveBound = true;
+                    dgKeyEl.addEventListener('change', async () => {
+                        await chrome.storage.sync.set({ deepgramApiKey: dgKeyEl.value.trim() });
+                        this.syncAsrEngineOptions();
+                        this.showAlert('Deepgram key saved.', 'success');
+                    });
+                }
+            }
+            const dgModelEl = document.getElementById('deepgramModel');
+            if (dgModelEl) {
+                dgModelEl.value = asrSettings.deepgramModel || 'nova-2';
+                if (!dgModelEl._autoSaveBound) {
+                    dgModelEl._autoSaveBound = true;
+                    dgModelEl.addEventListener('change', async () => {
+                        await chrome.storage.sync.set({ deepgramModel: dgModelEl.value });
+                        this.showAlert('Deepgram model saved.', 'success');
+                    });
+                }
+            }
             const element = document.getElementById('ltAsrEngine');
             if (element) {
                 element.value = asrSettings.ltAsrEngine || 'groq';
