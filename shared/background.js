@@ -484,6 +484,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return;
         }
 
+        // This IS the explicit start, so it is the one thing that clears the latch.
+        await setUserStopLatch(false);
+
         const targetTabId = request.tabId;
         const settings = await getSettings();
         const apiKey = settings.apiKey || DEFAULT_OPENAI_API_KEY;
@@ -538,12 +541,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (explicit) {
           console.log('🎙️ [BG] Explicit stop requested by user. Terminating captions session.');
           _userStoppedAt = Date.now();
+          await setUserStopLatch(true);
           clearReconnectWatchdog();
           isReconnecting = false;
           autoReconnectConfig = null;
           const res = await stopTabCapture(tabId);
           sendResponse(res);
-        } else if (!isCapturing || Date.now() - _userStoppedAt < USER_STOP_GRACE_MS) {
+        } else if (!isCapturing || autoStartBlocked() || Date.now() - _userStoppedAt < USER_STOP_GRACE_MS) {
           // The offscreen document tears its tracks down as it closes, and those
           // late "track ended" reports used to re-arm reconnect on a session the
           // user had already stopped — which is how captions came back by
@@ -747,27 +751,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   // ─── Streaming ASR ("dịch cabin") ──────────────────────────────────────────
+  // Translation is emitted in phrase-sized pieces as the speaker talks, not once
+  // per finished sentence. Waiting for the sentence is what made the rhythm break:
+  // the source words scrolled continuously while the translation arrived in one
+  // lump at the end, so both reading and listening stalled and then jumped.
+  // A human interpreter does the same thing — render a unit of meaning as soon as
+  // there is enough of it, and let the next unit continue from it.
   // Partial wording, still being revised. Put it on screen immediately: this is
   // the whole reason for streaming, and it costs no API call. Deliberately NOT
   // translated — a machine translation of half a clause is worse than showing
   // the speaker's own words until the wording settles.
   if (request.action === 'lt_stream_interim') {
-    try {
-      const tabId = activeTabId;
-      const session = tabId && self.ltSessions && self.ltSessions[tabId];
-      if (session && !session._utteranceStartedAt) session._utteranceStartedAt = Date.now();
-      broadcastMessage({
-        action: 'lt_subtitle',
-        original: '',
-        translated: '🎙️ ' + request.text,
-        mode: 'tabCapture',
-        timestamp: Date.now(),
-        isUpdate: true
-      });
-      sendResponse({ success: true });
-    } catch (err) {
-      sendResponse({ success: false, error: err.message });
-    }
+    (async () => {
+      try {
+        await handleCabinInterim(request);
+        sendResponse({ success: true });
+      } catch (err) {
+        console.error('❌ [BG] cabin interim failed:', err);
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
     return true;
   }
 
@@ -810,15 +813,45 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         session.audioMs = startedAt ? Math.min(Date.now() - startedAt, 15000) : 0;
         session._utteranceStartedAt = 0;
 
-        session.chunks = [text];
-        session.lastStrongSpeech = true;
-        await finalizeAndTranslateSentence(
-          session,
-          cfg.sourceLang || 'auto',
-          cfg.targetLang || 'vi',
-          cfg.ltEngine,
-          activeTopic
-        );
+        // Most of this utterance has already been translated phrase by phrase
+        // while it was being spoken. Only the tail is left — translating the
+        // whole thing again here would replay what the viewer has already read
+        // and the voice has already said.
+        const st = cabinState(session);
+        const allWords = text.split(/\s+/).filter(Boolean);
+        const remainder = allWords.slice(st.committed).join(' ');
+
+        if (remainder.trim()) {
+          const piece = (await translateCabinPhrase(remainder, session, cfg) || '').trim();
+          if (piece) {
+            st.translated = st.translated ? `${st.translated} ${piece}` : piece;
+            if (_cachedTtsEnabled) {
+              speakSubtitle(piece, cfg.targetLang || 'vi', _cachedTtsSpeed || 1.25, remainder, session.segmentId, ++session.subtitleSeq);
+            }
+          }
+        }
+
+        const finalLine = st.translated.trim();
+        session._cabin = null;
+        session._utteranceStartedAt = 0;
+
+        if (finalLine) {
+          if (!session.history) session.history = [];
+          session.history.push({ original: text, translated: finalLine });
+          if (session.history.length > 5) session.history.shift();
+          await updateCaptionHistoryInStorage(text, finalLine);
+          session.segmentId = 'seg_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+          broadcastMessage({
+            action: 'lt_cabin_line',
+            translated: finalLine,
+            original: text,
+            tail: '',
+            targetLang: cfg.targetLang || 'vi',
+            durationMs: session.audioMs || 0,
+            done: true
+          });
+        }
+        await saveLtSessions();
         sendResponse({ success: true });
       } catch (err) {
         console.error('❌ [BG] lt_stream_final failed:', err);
@@ -3648,6 +3681,29 @@ const USER_STOP_GRACE_MS = 3000;
 // A start request this soon after an explicit stop is treated as the same click
 // racing the Stop→Start button flip, not a deliberate restart.
 const START_AFTER_STOP_COOLDOWN_MS = 1500;
+
+// A latch on the user's intent, not a time window.
+//
+// Several independent mechanisms can bring a session back: the reconnect
+// watchdog, the tabs.onUpdated page-load handler, the service-worker restore
+// block, and a late "track ended" report from a closing offscreen document.
+// Each has been fixed at least once with its own guard, and each guard is a
+// timeout — 1.5s, 3s, 60s — so any restart arriving later than its own window
+// still gets through, and every new automatic path has to remember to add one.
+//
+// This inverts that: once the user presses Stop, NOTHING automatic may start a
+// capture again. Only an explicit start from the UI clears it. Time never does.
+let _userStoppedLatch = false;
+
+async function setUserStopLatch(on) {
+  _userStoppedLatch = !!on;
+  try { await chrome.storage.local.set({ ltUserStopped: !!on }); } catch (_) {}
+}
+
+/** True when the user has stopped captions and not explicitly started them again. */
+function autoStartBlocked() {
+  return _userStoppedLatch;
+}
 let _reconnectDeadline = 0;
 let _reconnectWatchdog = null;
 let _userStoppedAt = 0;
@@ -4158,12 +4214,13 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 // Automatically reconnect tab capture when the captured tab is reloaded or navigated!
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (tabId === activeTabId && changeInfo.status === 'complete' && isCapturing && reconnectWindowOpen()) {
+  if (tabId === activeTabId && changeInfo.status === 'complete' && isCapturing && reconnectWindowOpen() && !autoStartBlocked()) {
     console.log(`🎙️ [BG] Captured tab ${tabId} loaded. Attempting automatic tab capture reconnection...`);
 
     setTimeout(async () => {
-      // Re-verify capture session parameters
-      if (!isCapturing || !reconnectWindowOpen() || activeTabId !== tabId) return;
+      // Re-verify capture session parameters. The latch is re-checked here too:
+      // the user can press Stop during this delay.
+      if (!isCapturing || !reconnectWindowOpen() || activeTabId !== tabId || autoStartBlocked()) return;
 
       try {
         const config = autoReconnectConfig || {};
@@ -4263,6 +4320,122 @@ const RMS_MIN_THRESHOLD = 0.004;
 // toggle: the same judgement, but made per segment instead of per session, so a
 // stream that mixes music and dialogue is handled correctly either way.
 const RMS_STRONG_SPEECH_MULTIPLIER = 2.5;
+
+// ─── Cabin mode: incremental phrase translation ──────────────────────────────
+// Commit a phrase once this many NEW words have settled. Around five words is
+// where a fragment usually carries enough meaning to translate on its own;
+// smaller pieces produce word salad, larger ones bring back the stall.
+const CABIN_PHRASE_WORDS = 5;
+// The last words of an interim hypothesis are the ones the recogniser is most
+// likely to revise, so never commit them — wait for more audio to settle them.
+const CABIN_TAIL_WORDS = 2;
+// Floor on how often a phrase may be translated, so a fast speaker cannot turn
+// every interim into its own request.
+const CABIN_MIN_INTERVAL_MS = 500;
+// A word count alone leaves a lump at the end of every sentence: whatever has
+// not reached CABIN_PHRASE_WORDS when the speaker stops arrives all at once, so
+// the rhythm still breaks — just later. Past this much lag, take a shorter
+// phrase rather than keep waiting. Interpreters do the same: they go when they
+// have a unit OR when they have fallen too far behind, whichever comes first.
+const CABIN_MAX_LAG_MS = 1400;
+const CABIN_MIN_PHRASE_WORDS = 3;
+
+function cabinState(session) {
+  if (!session._cabin) {
+    session._cabin = { committed: 0, translated: '', lastAt: 0, busy: false };
+  }
+  return session._cabin;
+}
+
+/** Translate one phrase, using whichever subtitle engine the user picked. */
+async function translateCabinPhrase(text, session, cfg) {
+  const targetLang = cfg.targetLang || 'vi';
+  const topic = _cachedTopic || 'general';
+  const engine = cfg.ltEngine || 'google';
+  let out = '';
+
+  if (engine === 'openai' || engine === 'groq') {
+    const res = await translateLiveWithAI({
+      text,
+      from: cfg.sourceLang || 'auto',
+      to: targetLang,
+      // The discourse context is what makes a fragment translatable at all —
+      // guideline #5 of the live prompt exists for exactly this case.
+      context: [...(session.history || [])],
+      topic
+    });
+    out = (res && res.success && res.translated) ? res.translated : '';
+  }
+  if (!out) out = await translateGoogleBg(text, targetLang);
+  return await polishLiveTranslation(out, text, targetLang, topic);
+}
+
+async function handleCabinInterim(request) {
+  const tabId = activeTabId;
+  if (!tabId) return;
+  if (!self.ltSessions) self.ltSessions = {};
+  if (!self.ltSessions[tabId]) {
+    self.ltSessions[tabId] = {
+      chunks: [], lastText: '', lastTimestamp: Date.now(), history: [],
+      segmentId: 'seg_' + Date.now() + '_' + Math.floor(Math.random() * 1000)
+    };
+  }
+  const session = self.ltSessions[tabId];
+  const cfg = request.config || {};
+  const st = cabinState(session);
+
+  if (!session._utteranceStartedAt) session._utteranceStartedAt = Date.now();
+
+  const words = String(request.text || '').trim().split(/\s+/).filter(Boolean);
+  // Show the speaker's own words running ahead of the translation, so the tail
+  // of the sentence is never a blank gap while its phrase is still in flight.
+  broadcastMessage({
+    action: 'lt_cabin_line',
+    translated: st.translated,
+    tail: words.slice(st.committed).join(' '),
+    targetLang: cfg.targetLang || 'vi',
+    done: false
+  });
+
+  if (st.busy) return;
+  if (Date.now() - st.lastAt < CABIN_MIN_INTERVAL_MS) return;
+
+  const stableCount = Math.max(0, words.length - CABIN_TAIL_WORDS);
+  const pending = stableCount - st.committed;
+  const lag = Date.now() - (st.lastAt || 0);
+  const ready = pending >= CABIN_PHRASE_WORDS ||
+                (pending >= CABIN_MIN_PHRASE_WORDS && lag >= CABIN_MAX_LAG_MS);
+  if (!ready) return;
+
+  const phrase = words.slice(st.committed, stableCount).join(' ');
+  if (!phrase.trim()) return;
+
+  st.busy = true;
+  st.lastAt = Date.now();
+  try {
+    const piece = (await translateCabinPhrase(phrase, session, cfg) || '').trim();
+    if (piece) {
+      st.translated = st.translated ? `${st.translated} ${piece}` : piece;
+      st.committed = stableCount;
+      broadcastMessage({
+        action: 'lt_cabin_line',
+        translated: st.translated,
+        tail: words.slice(st.committed).join(' '),
+        targetLang: cfg.targetLang || 'vi',
+        done: false
+      });
+      // Speak only the new piece. The voice then runs continuously alongside the
+      // speaker instead of falling silent until the sentence closes.
+      if (_cachedTtsEnabled) {
+        speakSubtitle(piece, cfg.targetLang || 'vi', _cachedTtsSpeed || 1.25, phrase, session.segmentId, ++session.subtitleSeq);
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ [BG] cabin phrase translation failed:', err.message);
+  } finally {
+    st.busy = false;
+  }
+}
 
 // ─── ASR call pacing ─────────────────────────────────────────────────────────
 // Chunks are handed to the transcriber without awaiting, so nothing bounded how
@@ -7450,7 +7623,9 @@ function phoneticCorrectVietnameseTts(text, glossary) {
 // Startup recovery and synchronization on Service Worker load
 (async () => {
   try {
-    const data = await chrome.storage.local.get(['isCapturing', 'activeTabId', 'autoReconnectConfig', 'ltSessionsStored', 'ltStoppedAt']);
+    const data = await chrome.storage.local.get(['isCapturing', 'activeTabId', 'autoReconnectConfig', 'ltSessionsStored', 'ltStoppedAt', 'ltUserStopped']);
+    // Restore the latch before anything can act on the stale capture flag.
+    _userStoppedLatch = !!data.ltUserStopped;
     self.ltSessions = data.ltSessionsStored || {};
     // Clear transient flags that may have been persisted mid-flight before the
     // service worker died — a stale _interimBusy would suppress interim
@@ -7460,8 +7635,10 @@ function phoneticCorrectVietnameseTts(text, glossary) {
     // worker restart. Storage is the only state that survives the worker, so the
     // stop timestamp is the tie-breaker against a stale isCapturing flag.
     const stoppedRecently = data.ltStoppedAt && (Date.now() - data.ltStoppedAt) < RESTORE_BLOCK_AFTER_STOP_MS;
-    if (data.isCapturing && data.activeTabId && stoppedRecently) {
-      console.log('🎙️ [BG] Ignoring stale capture state: the user stopped captions moments ago.');
+    // The timestamp only covers the first minute. The latch has no expiry, which
+    // is what makes a stop survive a worker restart an hour later.
+    if (data.isCapturing && data.activeTabId && (stoppedRecently || _userStoppedLatch)) {
+      console.log('🎙️ [BG] Ignoring stale capture state: the user stopped captions and has not started them again.');
       isCapturing = false;
       activeTabId = null;
       autoReconnectConfig = null;

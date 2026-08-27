@@ -3690,6 +3690,9 @@ const contentScriptMessageListener = (request, sender, sendResponse) => {
     } else if (request.action === 'lt_degraded') {
         LiveTranslator.showDegraded(request.message);
         sendResponse({ success: true });
+    } else if (request.action === 'lt_cabin_line') {
+        LiveTranslator.showCabinLine(request);
+        sendResponse({ success: true });
     } else if (request.action === 'lt_processing') {
         LiveTranslator.showProcessing();
         sendResponse({ success: true });
@@ -4177,6 +4180,7 @@ const LiveTranslator = {
   _ttsChars: 0,
   _ttsCpsEma: 0,
   _lastEndedTtsSeq: -1,
+  _cabinLine: null,
 
   _preset() {
     return SUBTITLE_STYLES[this._style] || SUBTITLE_STYLES.netflix;
@@ -4658,6 +4662,76 @@ const LiveTranslator = {
 
   showProcessing() {
     // Intentionally no-op: keep the previous translation visible until the next final subtitle arrives.
+  },
+
+  /**
+   * Cabin mode: one line that GROWS as the speaker talks, instead of a finished
+   * line appearing all at once when they stop.
+   *
+   * Deliberately bypasses the display queue. That queue exists to pace whole
+   * captions that arrive in bursts; here the pacing is the speaker's own, and
+   * routing growth updates through a queue would reintroduce the very stall this
+   * mode removes. The line only joins the feed when `done` arrives.
+   */
+  showCabinLine(msg) {
+    if (!msg) return;
+    if (msg.targetLang) this.targetLang = msg.targetLang;
+    this.createOverlay();
+
+    const translated = (msg.translated || '').trim();
+    const tail = (msg.tail || '').trim();
+    if (!translated && !tail) return;
+
+    let line = this._cabinLine;
+    // The previous line was closed, or the feed was rebuilt under us.
+    if (!line || !line.isConnected) {
+      line = this._lineForFinal();
+      if (!line) return;
+      this._cabinLine = line;
+    }
+
+    const transEl = line.querySelector('.subtitle-translation');
+    const origEl = line.querySelector('.subtitle-original');
+    if (!transEl) return;
+
+    this.show();
+    this._flushReveal();
+    transEl.style.animation = 'none';
+    transEl.style.color = this._preset().translation.color;
+    transEl.style.fontStyle = 'normal';
+    transEl.style.opacity = '1';
+
+    // Translation, then the words already spoken but not yet translated, shown
+    // dimmed. Without that tail the end of every sentence is a blank gap while
+    // its phrase is still being translated, which reads as a stall.
+    transEl.textContent = '';
+    const doneEl = document.createElement('span');
+    doneEl.textContent = translated;
+    transEl.appendChild(doneEl);
+    if (tail && !msg.done) {
+      const tailEl = document.createElement('span');
+      tailEl.textContent = (translated ? ' ' : '') + tail;
+      tailEl.style.opacity = '0.45';
+      transEl.appendChild(tailEl);
+    }
+
+    if (origEl) {
+      const orig = (msg.original || '').trim();
+      if (msg.done && orig) {
+        origEl.style.display = 'block';
+        origEl.textContent = orig;
+      } else {
+        origEl.style.display = 'none';
+        origEl.textContent = '';
+      }
+    }
+
+    this._trimFeed();
+    if (this.dimTimeout) clearTimeout(this.dimTimeout);
+    this.dimTimeout = setTimeout(() => { this.hide(); }, 20000);
+
+    // Utterance over — let the next one start a new line.
+    if (msg.done) this._cabinLine = null;
   },
 
   /**
